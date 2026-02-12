@@ -23,6 +23,35 @@ st.set_page_config(
 )
 
 # =============================================================================
+# BRANDING CONFIGURATION
+# =============================================================================
+def get_branding():
+    """Load branding from Streamlit secrets or use defaults."""
+    defaults = {
+        "company_name": "OrderFloz",
+        "logo_url": "",
+        "primary_color": "#1a5276",
+        "accent_color": "#2ecc71",
+        "support_email": "support@orderfloz.com",
+        "powered_by": True
+    }
+    
+    try:
+        if hasattr(st, 'secrets') and 'branding' in st.secrets:
+            branding = dict(st.secrets.branding)
+            # Merge with defaults for any missing keys
+            for key, value in defaults.items():
+                if key not in branding:
+                    branding[key] = value
+            return branding
+    except:
+        pass
+    
+    return defaults
+
+BRANDING = get_branding()
+
+# =============================================================================
 # CONSTANTS
 # =============================================================================
 RETAIL_SOURCES = ['shopify retail', 'shopify', 'web', 'website', 'online', 'retail']
@@ -307,9 +336,18 @@ def get_column_config():
 # MAIN APP
 # =============================================================================
 def main():
-    st.title("🌊 OrderFloz")
-    st.subheader("🎭 DEMO MODE - Read Only")
-    st.info("This demo connects to real APIs but **never writes any data**. Safe to use with production systems.")
+    # Header with branding
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if BRANDING.get("logo_url"):
+            st.image(BRANDING["logo_url"], width=80)
+        else:
+            st.markdown("### 🌊")
+    with col2:
+        st.title(BRANDING["company_name"])
+    
+    st.subheader("Cin7 → HubSpot Order Sync")
+    st.info("This connects to real APIs and syncs wholesale orders to HubSpot as Closed Won deals.")
     
     # -------------------------------------------------------------------------
     # SIDEBAR
@@ -378,7 +416,27 @@ def main():
             if config.get('remember'):
                 clear_config()
         
-        st.caption("🔒 Demo mode - no data will be written")
+        st.divider()
+        
+        # Branding Settings
+        with st.expander("🎨 Branding Settings"):
+            st.caption("Configure in Streamlit secrets under `[branding]`")
+            st.markdown(f"""
+            | Setting | Current Value |
+            |---------|---------------|
+            | Company Name | {BRANDING['company_name']} |
+            | Logo URL | {'✅ Set' if BRANDING.get('logo_url') else '❌ Not set'} |
+            | Primary Color | {BRANDING['primary_color']} |
+            | Support Email | {BRANDING.get('support_email', 'Not set')} |
+            | Show "Powered by" | {'Yes' if BRANDING.get('powered_by', True) else 'No'} |
+            """)
+            st.code("""# Add to Streamlit secrets:
+[branding]
+company_name = "Your Company"
+logo_url = "https://..."
+primary_color = "#1a5276"
+support_email = "support@you.com"
+powered_by = true""", language="toml")
     
     # -------------------------------------------------------------------------
     # MAIN CONTENT
@@ -687,7 +745,13 @@ def main():
         """)
     
     st.divider()
-    st.caption("🌊 **OrderFloz** — Cin7 to HubSpot order sync")
+    # Footer with branding
+    footer_text = f"**{BRANDING['company_name']}** — Cin7 to HubSpot order sync"
+    if BRANDING.get("powered_by", True):
+        footer_text += " | Powered by OrderFloz"
+    if BRANDING.get("support_email"):
+        footer_text += f" | {BRANDING['support_email']}"
+    st.caption(footer_text)
 
 if __name__ == "__main__":
     main()
