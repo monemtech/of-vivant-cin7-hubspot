@@ -23,11 +23,57 @@ st.set_page_config(
 )
 
 # =============================================================================
+# ADMIN CONFIGURATION
+# =============================================================================
+BRANDING_FILE = Path(".orderfloz_branding.json")
+
+def get_admin_emails():
+    """Get list of admin emails from secrets."""
+    try:
+        if hasattr(st, 'secrets') and 'admin' in st.secrets:
+            emails = st.secrets.admin.get('emails', [])
+            if isinstance(emails, str):
+                return [emails]
+            return list(emails)
+    except:
+        pass
+    return ["sam@monemtech.com"]  # Default admin
+
+def get_admin_password():
+    """Get admin password from secrets."""
+    try:
+        if hasattr(st, 'secrets') and 'admin' in st.secrets:
+            return st.secrets.admin.get('password', 'orderfloz2024')
+    except:
+        pass
+    return "orderfloz2024"  # Default password - CHANGE IN SECRETS
+
+def is_admin_authenticated():
+    """Check if current session is admin authenticated."""
+    return st.session_state.get('admin_authenticated', False)
+
+def authenticate_admin(email, password):
+    """Verify admin credentials."""
+    admin_emails = get_admin_emails()
+    admin_password = get_admin_password()
+    
+    if email.lower() in [e.lower() for e in admin_emails] and password == admin_password:
+        st.session_state.admin_authenticated = True
+        st.session_state.admin_email = email
+        return True
+    return False
+
+def logout_admin():
+    """Log out admin."""
+    st.session_state.admin_authenticated = False
+    st.session_state.admin_email = None
+
+# =============================================================================
 # BRANDING CONFIGURATION
 # =============================================================================
-def get_branding():
-    """Load branding from Streamlit secrets or use defaults."""
-    defaults = {
+def get_default_branding():
+    """Return default branding settings."""
+    return {
         "company_name": "OrderFloz",
         "logo_url": "",
         "primary_color": "#1a5276",
@@ -35,11 +81,26 @@ def get_branding():
         "support_email": "support@orderfloz.com",
         "powered_by": True
     }
+
+def load_branding():
+    """Load branding from file, secrets, or defaults (in that order)."""
+    defaults = get_default_branding()
     
+    # First try branding file (admin edits)
+    if BRANDING_FILE.exists():
+        try:
+            branding = json.loads(BRANDING_FILE.read_text())
+            for key, value in defaults.items():
+                if key not in branding:
+                    branding[key] = value
+            return branding
+        except:
+            pass
+    
+    # Then try secrets
     try:
         if hasattr(st, 'secrets') and 'branding' in st.secrets:
             branding = dict(st.secrets.branding)
-            # Merge with defaults for any missing keys
             for key, value in defaults.items():
                 if key not in branding:
                     branding[key] = value
@@ -48,6 +109,16 @@ def get_branding():
         pass
     
     return defaults
+
+def save_branding(branding):
+    """Save branding to file."""
+    BRANDING_FILE.write_text(json.dumps(branding, indent=2))
+
+def get_branding():
+    """Get current branding (from session state or load fresh)."""
+    if 'branding' not in st.session_state:
+        st.session_state.branding = load_branding()
+    return st.session_state.branding
 
 BRANDING = get_branding()
 
@@ -74,6 +145,12 @@ if 'selected_import' not in st.session_state:
     st.session_state.selected_import = set()
 if 'selected_review' not in st.session_state:
     st.session_state.selected_review = set()
+if 'admin_authenticated' not in st.session_state:
+    st.session_state.admin_authenticated = False
+if 'admin_email' not in st.session_state:
+    st.session_state.admin_email = None
+if 'branding' not in st.session_state:
+    st.session_state.branding = load_branding()
 
 # =============================================================================
 # CONFIG FILE HANDLING
@@ -336,15 +413,20 @@ def get_column_config():
 # MAIN APP
 # =============================================================================
 def main():
-    # Header with branding
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if BRANDING.get("logo_url"):
-            st.image(BRANDING["logo_url"], width=80)
-        else:
-            st.markdown("### 🌊")
-    with col2:
-        st.title(BRANDING["company_name"])
+    # Get current branding (may have been updated by admin)
+    branding = get_branding()
+    
+    # Header with branding - centered logo
+    if branding.get("logo_url"):
+        col1, col2, col3 = st.columns([2, 1, 2])
+        with col2:
+            try:
+                st.image(branding["logo_url"], width=120)
+            except:
+                pass
+    
+    # Centered title
+    st.markdown(f"<h1 style='text-align: center;'>{branding['company_name']}</h1>", unsafe_allow_html=True)
     
     st.subheader("Cin7 → HubSpot Order Sync")
     st.info("This connects to real APIs and syncs wholesale orders to HubSpot as Closed Won deals.")
@@ -418,25 +500,61 @@ def main():
         
         st.divider()
         
-        # Branding Settings
-        with st.expander("🎨 Branding Settings"):
-            st.caption("Configure in Streamlit secrets under `[branding]`")
-            st.markdown(f"""
-            | Setting | Current Value |
-            |---------|---------------|
-            | Company Name | {BRANDING['company_name']} |
-            | Logo URL | {'✅ Set' if BRANDING.get('logo_url') else '❌ Not set'} |
-            | Primary Color | {BRANDING['primary_color']} |
-            | Support Email | {BRANDING.get('support_email', 'Not set')} |
-            | Show "Powered by" | {'Yes' if BRANDING.get('powered_by', True) else 'No'} |
-            """)
-            st.code("""# Add to Streamlit secrets:
-[branding]
-company_name = "Your Company"
-logo_url = "https://..."
-primary_color = "#1a5276"
-support_email = "support@you.com"
-powered_by = true""", language="toml")
+        # Admin Settings
+        with st.expander("🔐 Admin Settings"):
+            if is_admin_authenticated():
+                st.success(f"✅ Logged in as {st.session_state.get('admin_email', 'Admin')}")
+                
+                if st.button("🚪 Logout"):
+                    logout_admin()
+                    st.rerun()
+                
+                st.divider()
+                st.subheader("🎨 Branding")
+                
+                # Load current branding
+                current_branding = get_branding()
+                
+                # Editable fields
+                new_company = st.text_input("Company Name", value=current_branding.get('company_name', ''))
+                new_logo = st.text_input("Logo URL", value=current_branding.get('logo_url', ''), help="URL to your logo image")
+                new_color = st.color_picker("Primary Color", value=current_branding.get('primary_color', '#1a5276'))
+                new_email = st.text_input("Support Email", value=current_branding.get('support_email', ''))
+                new_powered = st.checkbox("Show 'Powered by OrderFloz'", value=current_branding.get('powered_by', True))
+                
+                # Preview logo if URL provided
+                if new_logo:
+                    st.caption("Logo preview:")
+                    try:
+                        st.image(new_logo, width=80)
+                    except:
+                        st.warning("⚠️ Could not load logo from URL")
+                
+                if st.button("💾 Save Branding", type="primary"):
+                    updated_branding = {
+                        "company_name": new_company,
+                        "logo_url": new_logo,
+                        "primary_color": new_color,
+                        "accent_color": current_branding.get('accent_color', '#2ecc71'),
+                        "support_email": new_email,
+                        "powered_by": new_powered
+                    }
+                    save_branding(updated_branding)
+                    st.session_state.branding = updated_branding
+                    st.success("✅ Branding saved!")
+                    st.rerun()
+                
+            else:
+                st.caption("Admin login required to edit settings")
+                admin_email = st.text_input("Email", key="admin_email_input")
+                admin_password = st.text_input("Password", type="password", key="admin_password_input")
+                
+                if st.button("🔑 Login"):
+                    if authenticate_admin(admin_email, admin_password):
+                        st.success("✅ Logged in!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Invalid credentials")
     
     # -------------------------------------------------------------------------
     # MAIN CONTENT
@@ -745,12 +863,13 @@ powered_by = true""", language="toml")
         """)
     
     st.divider()
-    # Footer with branding
-    footer_text = f"**{BRANDING['company_name']}** — Cin7 to HubSpot order sync"
-    if BRANDING.get("powered_by", True):
+    # Footer with branding (use branding variable from main())
+    branding = get_branding()
+    footer_text = f"**{branding['company_name']}** — Cin7 to HubSpot order sync"
+    if branding.get("powered_by", True):
         footer_text += " | Powered by OrderFloz"
-    if BRANDING.get("support_email"):
-        footer_text += f" | {BRANDING['support_email']}"
+    if branding.get("support_email"):
+        footer_text += f" | {branding['support_email']}"
     st.caption(footer_text)
 
 if __name__ == "__main__":
