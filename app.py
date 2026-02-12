@@ -372,7 +372,8 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         'Company': order.get('company') or order.get('billingCompany') or '',
         'Customer': customer,
         'Email': order.get('email') or order.get('memberEmail') or '',
-        'Date': (order.get('createdDate') or '')[:10],
+        'Order Date': (order.get('createdDate') or '')[:10],
+        'Dispatched': (order.get('dispatchedDate') or '')[:10],
         'Status': order.get('stage') or order.get('status') or '',
     }
     
@@ -665,7 +666,7 @@ def main():
                 'Select': st.column_config.CheckboxColumn('Select', default=True),
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f')
             },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Date', 'Status'],
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Status'],
             key="import_editor"
         )
         
@@ -717,7 +718,7 @@ def main():
                     'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
-                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Date', 'Status', 'Reason'],
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Status', 'Reason'],
                 key="review_editor"
             )
             
