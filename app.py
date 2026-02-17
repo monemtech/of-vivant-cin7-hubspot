@@ -1280,26 +1280,36 @@ def main():
     st.caption("These orders passed all filters and are pre-selected for import. Click column headers to sort.")
     
     if to_import:
+        # Initialize toggle counter if not exists
+        if 'import_toggle_count' not in st.session_state:
+            st.session_state.import_toggle_count = 0
+        
         # Calculate current selection state
         selected_count = len(st.session_state.selected_import & import_refs)
         all_selected = selected_count == len(import_refs)
         
-        # Single toggle button with dynamic label
-        btn_label = "☐ Deselect All" if all_selected else "☑ Select All"
-        col_btn, col_spacer = st.columns([1, 4])
-        with col_btn:
-            if st.button(btn_label, key="toggle_import_btn"):
-                if all_selected:
-                    st.session_state.selected_import = set()
-                else:
-                    st.session_state.selected_import = import_refs.copy()
-                st.rerun()
+        # Simple checkbox for select/deselect all
+        select_all = st.checkbox(
+            "Select all orders", 
+            value=all_selected,
+            key=f"select_all_import_{st.session_state.import_toggle_count}"
+        )
+        
+        # If checkbox state doesn't match current state, update and force refresh
+        if select_all and not all_selected:
+            st.session_state.selected_import = import_refs.copy()
+            st.session_state.import_toggle_count += 1
+            st.rerun()
+        elif not select_all and all_selected:
+            st.session_state.selected_import = set()
+            st.session_state.import_toggle_count += 1
+            st.rerun()
         
         # Create dataframe with Select column
         df_import = prepare_dataframe(to_import)
         df_import.insert(0, 'Select', df_import['Order #'].apply(lambda x: x in st.session_state.selected_import))
         
-        # Editable dataframe
+        # Editable dataframe - key changes when toggle is used to force reset
         edited_import = st.data_editor(
             df_import,
             use_container_width=True,
@@ -1310,10 +1320,10 @@ def main():
                 'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small')
             },
             disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
-            key="import_editor"
+            key=f"import_editor_{st.session_state.import_toggle_count}"
         )
         
-        # Always update selections based on data_editor (this is the source of truth)
+        # Update selections from data editor
         st.session_state.selected_import = set(edited_import[edited_import['Select']]['Order #'].tolist())
         
         # Show count of selected
@@ -1336,26 +1346,36 @@ def main():
         st.caption("These orders need manual review before import — check the box to include. Click column headers to sort.")
         
         if to_review:
+            # Initialize toggle counter if not exists
+            if 'review_toggle_count' not in st.session_state:
+                st.session_state.review_toggle_count = 0
+            
             # Calculate current selection state
             selected_review_count = len(st.session_state.selected_review & review_refs)
             all_selected_review = selected_review_count == len(review_refs)
             
-            # Single toggle button with dynamic label
-            btn_label = "☐ Deselect All" if all_selected_review else "☑ Select All"
-            col_btn, col_spacer = st.columns([1, 4])
-            with col_btn:
-                if st.button(btn_label, key="toggle_review_btn"):
-                    if all_selected_review:
-                        st.session_state.selected_review = set()
-                    else:
-                        st.session_state.selected_review = review_refs.copy()
-                    st.rerun()
+            # Simple checkbox for select/deselect all
+            select_all_review = st.checkbox(
+                "Select all orders", 
+                value=all_selected_review,
+                key=f"select_all_review_{st.session_state.review_toggle_count}"
+            )
+            
+            # If checkbox state doesn't match current state, update and force refresh
+            if select_all_review and not all_selected_review:
+                st.session_state.selected_review = review_refs.copy()
+                st.session_state.review_toggle_count += 1
+                st.rerun()
+            elif not select_all_review and all_selected_review:
+                st.session_state.selected_review = set()
+                st.session_state.review_toggle_count += 1
+                st.rerun()
             
             # Create dataframe with Select column and Reason
             df_review = prepare_dataframe(to_review, include_reason=True)
             df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
             
-            # Editable dataframe
+            # Editable dataframe - key changes when toggle is used to force reset
             edited_review = st.data_editor(
                 df_review,
                 use_container_width=True,
@@ -1367,10 +1387,10 @@ def main():
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
                 disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
-                key="review_editor"
+                key=f"review_editor_{st.session_state.review_toggle_count}"
             )
             
-            # Always update selections based on data_editor (this is the source of truth)
+            # Update selections from data editor
             st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
             
             # Show count of selected
