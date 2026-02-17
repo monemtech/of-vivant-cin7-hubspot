@@ -1250,6 +1250,10 @@ def main():
     import_refs = {o.get('reference') for o in to_import}
     review_refs = {o.get('reference') for o in to_review}
     
+    # Pre-select all import orders on first load
+    if not st.session_state.selected_import and to_import:
+        st.session_state.selected_import = import_refs.copy()
+    
     st.divider()
     
     # -------------------------------------------------------------------------
@@ -1276,29 +1280,48 @@ def main():
     st.caption("These orders passed all filters and are pre-selected for import.")
     
     if to_import:
-        # Single checkbox - that's it
-        include_import = st.checkbox(
-            f"☑ Include all {len(to_import)} orders (${import_revenue:,.2f})",
-            value=True,
-            key="include_import"
-        )
+        # Initialize editor key (used to force refresh)
+        if 'import_editor_key' not in st.session_state:
+            st.session_state.import_editor_key = 0
         
-        # Update selection
-        if include_import:
-            st.session_state.selected_import = import_refs.copy()
-        else:
-            st.session_state.selected_import = set()
+        # Check current state
+        selected_count = len(st.session_state.selected_import & import_refs)
+        all_selected = selected_count == len(import_refs)
         
-        # Read-only table
+        # Simple button - no state conflicts
+        btn_label = "☐ Deselect All" if all_selected else "☑ Select All"
+        if st.button(btn_label, key="btn_import_toggle"):
+            if all_selected:
+                st.session_state.selected_import = set()
+            else:
+                st.session_state.selected_import = import_refs.copy()
+            st.session_state.import_editor_key += 1
+            st.rerun()
+        
+        # Build dataframe with current selections
         df_import = prepare_dataframe(to_import)
-        st.dataframe(
+        df_import.insert(0, 'Select', df_import['Order #'].apply(lambda x: x in st.session_state.selected_import))
+        
+        # Editable table - key changes when toggle is clicked
+        edited = st.data_editor(
             df_import,
             use_container_width=True,
             hide_index=True,
             column_config={
+                'Select': st.column_config.CheckboxColumn('Select', default=True),
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
-            }
+            },
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
+            key=f"import_editor_{st.session_state.import_editor_key}"
         )
+        
+        # Update session state from editor
+        st.session_state.selected_import = set(edited[edited['Select']]['Order #'].tolist())
+        
+        # Show count
+        n = len(st.session_state.selected_import & import_refs)
+        t = sum((o.get('total', 0) or 0) for o in to_import if o.get('reference') in st.session_state.selected_import)
+        st.caption(f"✓ {n} of {len(to_import)} selected (${t:,.2f})")
     else:
         st.info("No orders ready to import")
     
@@ -1311,29 +1334,49 @@ def main():
         st.caption("These orders need manual review before import.")
         
         if to_review:
-            # Single checkbox - unchecked by default
-            include_review = st.checkbox(
-                f"☐ Include all {len(to_review)} review orders (${review_revenue:,.2f})",
-                value=False,
-                key="include_review"
-            )
+            # Initialize editor key
+            if 'review_editor_key' not in st.session_state:
+                st.session_state.review_editor_key = 0
             
-            # Update selection
-            if include_review:
-                st.session_state.selected_review = review_refs.copy()
-            else:
-                st.session_state.selected_review = set()
+            # Check current state
+            selected_review_count = len(st.session_state.selected_review & review_refs)
+            all_review_selected = selected_review_count == len(review_refs)
             
-            # Read-only table
+            # Simple button - no state conflicts
+            btn_label = "☐ Deselect All" if all_review_selected else "☑ Select All"
+            if st.button(btn_label, key="btn_review_toggle"):
+                if all_review_selected:
+                    st.session_state.selected_review = set()
+                else:
+                    st.session_state.selected_review = review_refs.copy()
+                st.session_state.review_editor_key += 1
+                st.rerun()
+            
+            # Build dataframe
             df_review = prepare_dataframe(to_review, include_reason=True)
-            st.dataframe(
+            df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
+            
+            # Editable table
+            edited_review = st.data_editor(
                 df_review,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
+                    'Select': st.column_config.CheckboxColumn('Select', default=False),
                     'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
-                }
+                    'Reason': st.column_config.TextColumn('Reason', width='medium')
+                },
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
+                key=f"review_editor_{st.session_state.review_editor_key}"
             )
+            
+            # Update session state from editor
+            st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
+            
+            # Show count
+            n = len(st.session_state.selected_review & review_refs)
+            t = sum((o.get('total', 0) or 0) for o in to_review if o.get('reference') in st.session_state.selected_review)
+            st.caption(f"✓ {n} of {len(to_review)} selected (${t:,.2f})")
         else:
             st.info("No orders need review")
     
