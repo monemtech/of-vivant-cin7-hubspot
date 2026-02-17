@@ -250,44 +250,49 @@ def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) 
 HUBSPOT_STAGE_CLOSED_WON = "closedwon"
 HUBSPOT_STAGE_PENDING_PAYMENT = "decisionmakerboughtin"  # Update this to your actual stage ID
 
+# Payment terms that indicate payment is pending
+NET_PAYMENT_TERMS = ['net 30', 'net 60', 'net 90', 'net 15', 'net 30 days', 'net 60 days', 'net 45']
+
 def is_paid(order: dict) -> bool:
-    """Check if order is fully paid based on Cin7 'paid' field.
+    """Check if order is fully paid.
     
-    Cin7 returns:
-    - 'PAID: 100%' for fully paid orders
-    - Empty/None for unpaid orders (Net 30, pending, etc.)
-    
-    Special case: $0 orders are always "paid" (nothing to collect)
+    Logic:
+    1. $0 orders → always PAID (nothing to collect)
+    2. "PAID: 100%" in paid field → PAID
+    3. Net payment terms + not marked paid → UNPAID
+    4. Default → PAID (most orders are paid at dispatch)
     """
-    # Special case: $0 orders are always paid (nothing to collect)
+    # 1. $0 orders are always paid (nothing to collect)
     total = order.get('total', 0) or 0
     if float(total) == 0:
         return True
     
-    # Check the paid field
+    # 2. If paid field shows "100%" → definitely paid
     paid = str(order.get('paid') or '').strip()
-    
-    # If paid field contains "100%" → paid
     if '100%' in paid:
         return True
     
-    # If paid field is empty → unpaid
-    if not paid:
+    # 3. Check for Net payment terms (Net 30, Net 60, etc.)
+    payment_terms = str(order.get('paymentTerms') or '').lower()
+    has_net_terms = any(net in payment_terms for net in NET_PAYMENT_TERMS)
+    
+    # If has Net terms and NOT marked as "PAID: 100%" → unpaid
+    if has_net_terms:
         return False
     
-    # Handle other cases
-    paid_lower = paid.lower()
-    if 'paid' in paid_lower and 'unpaid' not in paid_lower:
-        return True
-    
-    return False
+    # 4. Default: assume paid (most orders are paid at time of dispatch)
+    return True
 
 def get_payment_debug(order: dict) -> str:
     """Return debug info about payment fields for troubleshooting."""
     paid = order.get('paid')
+    terms = order.get('paymentTerms')
+    parts = []
     if paid:
-        return f"paid:{paid}"
-    return "paid:(empty)"
+        parts.append(f"paid:{paid}")
+    if terms:
+        parts.append(f"terms:{terms}")
+    return ' | '.join(parts) if parts else "(no payment data)"
 
 def get_deal_stage(order: dict) -> tuple:
     """Determine HubSpot deal stage based on payment status.
