@@ -251,63 +251,43 @@ HUBSPOT_STAGE_CLOSED_WON = "closedwon"
 HUBSPOT_STAGE_PENDING_PAYMENT = "decisionmakerboughtin"  # Update this to your actual stage ID
 
 def is_paid(order: dict) -> bool:
-    """Check if order is fully paid based on multiple possible fields."""
-    # Method 1: Check totalOwing (most reliable if present)
-    total_owing = order.get('totalOwing')
-    if total_owing is not None:
-        try:
-            return float(total_owing) == 0
-        except:
-            pass
+    """Check if order is fully paid based on Cin7 'paid' field.
     
-    # Method 2: Check paid field (various formats)
-    paid = str(order.get('paid') or '').lower().strip()
-    if paid:
-        # Handle "PAID: 100%", "100%", "paid", "yes", etc.
-        if '100%' in paid or paid == 'paid' or paid == 'yes' or paid == 'true':
-            return True
-        # Handle "0%", "unpaid", "no", etc.
-        if '0%' in paid or paid == 'unpaid' or paid == 'no' or paid == 'false':
-            return False
+    Cin7 returns:
+    - 'PAID: 100%' for fully paid orders
+    - Empty/None for unpaid orders (Net 30, pending, etc.)
     
-    # Method 3: Check paymentStatus field
-    payment_status = str(order.get('paymentStatus') or '').lower()
-    if 'paid' in payment_status and 'unpaid' not in payment_status:
+    Special case: $0 orders are always "paid" (nothing to collect)
+    """
+    # Special case: $0 orders are always paid (nothing to collect)
+    total = order.get('total', 0) or 0
+    if float(total) == 0:
         return True
-    if 'unpaid' in payment_status or 'pending' in payment_status:
+    
+    # Check the paid field
+    paid = str(order.get('paid') or '').strip()
+    
+    # If paid field contains "100%" → paid
+    if '100%' in paid:
+        return True
+    
+    # If paid field is empty → unpaid
+    if not paid:
         return False
     
-    # Method 4: Compare totalPaid vs total
-    total_paid = order.get('totalPaid')
-    total = order.get('total', 0) or 0
-    if total_paid is not None:
-        try:
-            return float(total_paid) >= float(total) and float(total) > 0
-        except:
-            pass
-    
-    # Default: If order is dispatched and we can't determine, assume paid
-    # (Most wholesale orders are paid, Net 30 is the exception)
-    status = str(order.get('stage') or order.get('status') or '').lower()
-    if status == 'dispatched':
+    # Handle other cases
+    paid_lower = paid.lower()
+    if 'paid' in paid_lower and 'unpaid' not in paid_lower:
         return True
     
-    return True  # Default to paid if unknown
+    return False
 
 def get_payment_debug(order: dict) -> str:
     """Return debug info about payment fields for troubleshooting."""
-    fields = []
-    if order.get('totalOwing') is not None:
-        fields.append(f"owing:{order.get('totalOwing')}")
-    if order.get('paid'):
-        fields.append(f"paid:{order.get('paid')}")
-    if order.get('paymentStatus'):
-        fields.append(f"status:{order.get('paymentStatus')}")
-    if order.get('totalPaid') is not None:
-        fields.append(f"totalPaid:{order.get('totalPaid')}")
-    if order.get('paymentTerms'):
-        fields.append(f"terms:{order.get('paymentTerms')}")
-    return ' | '.join(fields) if fields else 'No payment fields found'
+    paid = order.get('paid')
+    if paid:
+        return f"paid:{paid}"
+    return "paid:(empty)"
 
 def get_deal_stage(order: dict) -> tuple:
     """Determine HubSpot deal stage based on payment status.
@@ -906,7 +886,6 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         'Order Date': (order.get('createdDate') or '')[:10],
         'Dispatched': (order.get('dispatchedDate') or '')[:10],
         'Payment': '✅ Paid' if is_paid(order) else '⏳ Unpaid',
-        'Pay Debug': get_payment_debug(order),  # TEMP: Debug column
         'Deal Stage': get_deal_stage(order)[1],  # "Closed Won" or "Pending Payment"
         'Status': order.get('stage') or order.get('status') or '',
     }
@@ -1232,7 +1211,7 @@ def main():
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
                 'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small')
             },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Pay Debug', 'Deal Stage', 'Status'],
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
             key="import_editor"
         )
         
@@ -1285,7 +1264,7 @@ def main():
                     'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small'),
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
-                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Pay Debug', 'Deal Stage', 'Status', 'Reason'],
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
                 key="review_editor"
             )
             
