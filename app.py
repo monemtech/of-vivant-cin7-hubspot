@@ -209,7 +209,9 @@ def test_cin7(username: str, api_key: str) -> tuple:
     except Exception as e:
         return False, str(e)
 
-def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) -> list:
+def fetch_orders(username: str, api_key: str, since: datetime, until: datetime, 
+                 progress_callback=None) -> list:
+    """Fetch orders from Cin7 with optional progress updates."""
     start_str = since.strftime("%Y-%m-%dT00:00:00Z")
     end_str = until.strftime("%Y-%m-%dT23:59:59Z")
     
@@ -217,6 +219,14 @@ def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) 
     page = 1
     
     while True:
+        if progress_callback:
+            progress_callback(
+                phase="fetching",
+                page=page,
+                orders_so_far=len(all_orders),
+                message=f"Fetching page {page}..." if page > 1 else "Connecting to Cin7..."
+            )
+        
         r = requests.get(
             "https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
@@ -233,13 +243,38 @@ def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) 
         if not orders:
             break
         all_orders.extend(orders)
+        
+        if progress_callback:
+            progress_callback(
+                phase="fetching",
+                page=page,
+                orders_so_far=len(all_orders),
+                message=f"Found {len(all_orders)} orders..."
+            )
+        
         if len(orders) < 250:
             break
         page += 1
     
     # Add segment classification
+    if progress_callback:
+        progress_callback(
+            phase="processing",
+            page=page,
+            orders_so_far=len(all_orders),
+            message="Classifying orders..."
+        )
+    
     for o in all_orders:
         o['_segment'] = classify_order(o)
+    
+    if progress_callback:
+        progress_callback(
+            phase="complete",
+            page=page,
+            orders_so_far=len(all_orders),
+            message=f"Complete! {len(all_orders)} orders loaded."
+        )
     
     return all_orders
 
@@ -1120,20 +1155,74 @@ def main():
     since = datetime.combine(since_date, datetime.min.time())
     until = datetime.combine(until_date, datetime.max.time())
     
+    # Calculate date range for display
+    date_range_days = (until_date - since_date).days + 1
+    
     # Fetch button
     if st.button("🔄 Fetch Orders (Read Only)", type="primary", use_container_width=True):
         if not cin7_user or not cin7_key:
             st.error("Enter Cin7 credentials in sidebar")
         else:
-            with st.spinner("Fetching orders from Cin7..."):
-                orders = fetch_orders(cin7_user, cin7_key, since, until)
-            st.session_state.fetched_orders = orders
-            st.session_state.fetch_since = since_date
-            st.session_state.fetch_until = until_date
-            # Reset selections
-            st.session_state.selected_import = set()
-            st.session_state.selected_review = set()
-            st.success(f"Fetched {len(orders)} orders")
+            # Create a status container for professional loading display
+            status_container = st.empty()
+            progress_bar = st.progress(0)
+            
+            # Track state for progress updates
+            fetch_state = {"last_message": "", "orders": 0, "page": 1}
+            
+            def update_progress(phase, page, orders_so_far, message):
+                fetch_state["last_message"] = message
+                fetch_state["orders"] = orders_so_far
+                fetch_state["page"] = page
+                
+                # Update progress bar (estimate based on typical behavior)
+                if phase == "fetching":
+                    # Estimate progress - assume most fetches complete within 5 pages
+                    progress = min(0.1 + (page * 0.15), 0.85)
+                elif phase == "processing":
+                    progress = 0.90
+                else:
+                    progress = 1.0
+                
+                progress_bar.progress(progress)
+                
+                # Update status display
+                if phase == "fetching":
+                    if orders_so_far > 0:
+                        status_container.info(f"🔄 **Fetching orders...** Found {orders_so_far:,} orders so far (page {page})")
+                    else:
+                        status_container.info(f"🔌 **Connecting to Cin7...** Requesting {date_range_days} days of data")
+                elif phase == "processing":
+                    status_container.info(f"⚙️ **Processing...** Classifying {orders_so_far:,} orders")
+                else:
+                    status_container.success(f"✅ **Complete!** Loaded {orders_so_far:,} orders")
+            
+            try:
+                orders = fetch_orders(cin7_user, cin7_key, since, until, update_progress)
+                
+                # Clean up progress indicators
+                progress_bar.empty()
+                status_container.empty()
+                
+                st.session_state.fetched_orders = orders
+                st.session_state.fetch_since = since_date
+                st.session_state.fetch_until = until_date
+                # Reset selections
+                st.session_state.selected_import = set()
+                st.session_state.selected_review = set()
+                
+                # Show success with order breakdown
+                if orders:
+                    wholesale_count = sum(1 for o in orders if classify_order(o) == 'Wholesale')
+                    retail_count = len(orders) - wholesale_count
+                    st.success(f"✅ Fetched **{len(orders):,}** orders ({wholesale_count:,} wholesale, {retail_count:,} retail)")
+                else:
+                    st.warning("No orders found in the selected date range")
+                    
+            except Exception as e:
+                progress_bar.empty()
+                status_container.empty()
+                st.error(f"❌ Error fetching orders: {str(e)}")
     
     # -------------------------------------------------------------------------
     # RESULTS (from session state)
@@ -1336,54 +1425,76 @@ def main():
             if not hs_key:
                 st.error("Enter HubSpot API key in sidebar")
             else:
-                # Push to HubSpot with progress bar
-                progress_bar = st.progress(0, text="Syncing orders to HubSpot...")
+                # Professional loading display
+                status_container = st.empty()
+                progress_bar = st.progress(0)
+                
+                sync_state = {"current": 0, "total": total_selected}
                 
                 def update_progress(pct):
-                    progress_bar.progress(pct, text=f"Syncing orders... {int(pct*100)}%")
+                    sync_state["current"] = int(pct * total_selected)
+                    progress_bar.progress(pct)
+                    status_container.info(
+                        f"🔄 **Syncing to HubSpot...** {sync_state['current']}/{total_selected} orders "
+                        f"({int(pct*100)}%)"
+                    )
                 
-                results = push_orders_to_hubspot(hs_key, selected_orders, update_progress)
-                
-                progress_bar.empty()
-                
-                # Show results summary
-                created_count = len(results["created"])
-                updated_count = len(results["updated"])
-                skipped_count = len(results["skipped"])
-                failed_count = len(results["failed"])
-                
-                st.markdown(f"""
-                ### Sync Results
-                
-                | Action | Count | Description |
-                |--------|-------|-------------|
-                | ✅ Created | {created_count} | New deals created |
-                | 🔄 Updated | {updated_count} | Existing deals updated |
-                | ⏭️ Skipped | {skipped_count} | No changes needed |
-                | ❌ Failed | {failed_count} | Errors occurred |
-                
-                | Stage | Count |
-                |-------|-------|
-                | Closed Won | {results['closed_won']} |
-                | Pending Payment | {results['pending_payment']} |
-                """)
-                
-                # Show details for updated orders (most interesting)
-                if results["updated"]:
-                    with st.expander(f"🔄 Updated Deals ({updated_count})"):
-                        for item in results["updated"]:
-                            st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
-                
-                # Show details for failed orders
-                if results["failed"]:
-                    with st.expander(f"❌ Failed ({failed_count})", expanded=True):
-                        for item in results["failed"][:10]:
-                            st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
-                        if failed_count > 10:
-                            st.caption(f"...and {failed_count - 10} more")
-                
-                if failed_count == 0:
-                    st.balloons()
+                try:
+                    results = push_orders_to_hubspot(hs_key, selected_orders, update_progress)
+                    
+                    # Clean up progress indicators
+                    progress_bar.empty()
+                    status_container.empty()
+                    
+                    # Show results summary
+                    created_count = len(results["created"])
+                    updated_count = len(results["updated"])
+                    skipped_count = len(results["skipped"])
+                    failed_count = len(results["failed"])
+                    
+                    # Success banner
+                    if failed_count == 0:
+                        st.success(f"✅ **Sync complete!** {created_count + updated_count + skipped_count} orders processed successfully.")
+                    else:
+                        st.warning(f"⚠️ **Sync completed with errors.** {failed_count} orders failed.")
+                    
+                    st.markdown(f"""
+                    ### Sync Results
+                    
+                    | Action | Count | Description |
+                    |--------|-------|-------------|
+                    | ✅ Created | {created_count} | New deals created |
+                    | 🔄 Updated | {updated_count} | Existing deals updated |
+                    | ⏭️ Skipped | {skipped_count} | No changes needed |
+                    | ❌ Failed | {failed_count} | Errors occurred |
+                    
+                    | Stage | Count |
+                    |-------|-------|
+                    | Closed Won | {results['closed_won']} |
+                    | Pending Payment | {results['pending_payment']} |
+                    """)
+                    
+                    # Show details for updated orders (most interesting)
+                    if results["updated"]:
+                        with st.expander(f"🔄 Updated Deals ({updated_count})"):
+                            for item in results["updated"]:
+                                st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
+                    
+                    # Show details for failed orders
+                    if results["failed"]:
+                        with st.expander(f"❌ Failed ({failed_count})", expanded=True):
+                            for item in results["failed"][:10]:
+                                st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
+                            if failed_count > 10:
+                                st.caption(f"...and {failed_count - 10} more")
+                    
+                    if failed_count == 0:
+                        st.balloons()
+                        
+                except Exception as e:
+                    progress_bar.empty()
+                    status_container.empty()
+                    st.error(f"❌ Error syncing to HubSpot: {str(e)}")
     else:
         st.warning("No orders selected. Check orders above to include them in the sync.")
     
