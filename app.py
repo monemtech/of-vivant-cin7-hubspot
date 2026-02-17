@@ -1280,29 +1280,11 @@ def main():
     st.caption("These orders passed all filters and are pre-selected for import.")
     
     if to_import:
-        # Initialize editor key (used to force refresh)
-        if 'import_editor_key' not in st.session_state:
-            st.session_state.import_editor_key = 0
-        
-        # Check current state
-        selected_count = len(st.session_state.selected_import & import_refs)
-        all_selected = selected_count == len(import_refs)
-        
-        # Simple button - no state conflicts
-        btn_label = "☐ Deselect All" if all_selected else "☑ Select All"
-        if st.button(btn_label, key="btn_import_toggle"):
-            if all_selected:
-                st.session_state.selected_import = set()
-            else:
-                st.session_state.selected_import = import_refs.copy()
-            st.session_state.import_editor_key += 1
-            st.rerun()
-        
         # Build dataframe with current selections
         df_import = prepare_dataframe(to_import)
         df_import.insert(0, 'Select', df_import['Order #'].apply(lambda x: x in st.session_state.selected_import))
         
-        # Editable table - key changes when toggle is clicked
+        # Editable table with checkboxes
         edited = st.data_editor(
             df_import,
             use_container_width=True,
@@ -1312,7 +1294,7 @@ def main():
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
             },
             disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
-            key=f"import_editor_{st.session_state.import_editor_key}"
+            key="import_editor"
         )
         
         # Update session state from editor
@@ -1334,29 +1316,11 @@ def main():
         st.caption("These orders need manual review before import.")
         
         if to_review:
-            # Initialize editor key
-            if 'review_editor_key' not in st.session_state:
-                st.session_state.review_editor_key = 0
-            
-            # Check current state
-            selected_review_count = len(st.session_state.selected_review & review_refs)
-            all_review_selected = selected_review_count == len(review_refs)
-            
-            # Simple button - no state conflicts
-            btn_label = "☐ Deselect All" if all_review_selected else "☑ Select All"
-            if st.button(btn_label, key="btn_review_toggle"):
-                if all_review_selected:
-                    st.session_state.selected_review = set()
-                else:
-                    st.session_state.selected_review = review_refs.copy()
-                st.session_state.review_editor_key += 1
-                st.rerun()
-            
             # Build dataframe
             df_review = prepare_dataframe(to_review, include_reason=True)
             df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
             
-            # Editable table
+            # Editable table with checkboxes
             edited_review = st.data_editor(
                 df_review,
                 use_container_width=True,
@@ -1367,7 +1331,7 @@ def main():
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
                 disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
-                key=f"review_editor_{st.session_state.review_editor_key}"
+                key="review_editor"
             )
             
             # Update session state from editor
