@@ -244,8 +244,475 @@ def fetch_orders(username: str, api_key: str, since: datetime, until: datetime) 
     return all_orders
 
 # =============================================================================
-# HUBSPOT API
+# HUBSPOT API - FULL SYNC SYSTEM
 # =============================================================================
+# Deal stages in HubSpot (default pipeline)
+HUBSPOT_STAGE_CLOSED_WON = "closedwon"
+HUBSPOT_STAGE_PENDING_PAYMENT = "decisionmakerboughtin"  # Update this to your actual stage ID
+
+def is_paid(order: dict) -> bool:
+    """Check if order is fully paid based on totalOwing field."""
+    total_owing = order.get('totalOwing', None)
+    if total_owing is not None:
+        return float(total_owing) == 0
+    # Fallback to paid percentage if totalOwing not available
+    paid = (order.get('paid') or '').lower()
+    return '100%' in paid or paid == 'paid'
+
+def get_deal_stage(order: dict) -> tuple:
+    """Determine HubSpot deal stage based on payment status.
+    Returns (stage_id, stage_label)"""
+    if is_paid(order):
+        return HUBSPOT_STAGE_CLOSED_WON, "Closed Won"
+    return HUBSPOT_STAGE_PENDING_PAYMENT, "Pending Payment"
+
+def get_headers(api_key: str) -> dict:
+    """Get standard HubSpot API headers."""
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+# -----------------------------------------------------------------------------
+# SEARCH FUNCTIONS
+# -----------------------------------------------------------------------------
+def search_deal_by_order_ref(api_key: str, order_ref: str) -> dict:
+    """Search for existing deal by Cin7 order reference. Returns deal dict or None."""
+    headers = get_headers(api_key)
+    search_url = "https://api.hubapi.com/crm/v3/objects/deals/search"
+    
+    # Search in deal name (format: "Company - OrderRef" or just "OrderRef")
+    search_body = {
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "dealname",
+                "operator": "CONTAINS_TOKEN",
+                "value": order_ref
+            }]
+        }],
+        "properties": ["dealname", "amount", "dealstage", "pipeline"]
+    }
+    
+    try:
+        r = requests.post(search_url, headers=headers, json=search_body, timeout=30)
+        if r.status_code == 200:
+            results = r.json().get('results', [])
+            # Find exact match (order ref should be in deal name)
+            for deal in results:
+                if order_ref in deal.get('properties', {}).get('dealname', ''):
+                    return deal
+    except:
+        pass
+    return None
+
+def search_contact_by_email(api_key: str, email: str) -> dict:
+    """Search for existing contact by email. Returns contact dict or None."""
+    if not email:
+        return None
+    
+    headers = get_headers(api_key)
+    search_url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
+    search_body = {
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "email",
+                "operator": "EQ",
+                "value": email
+            }]
+        }],
+        "properties": ["email", "firstname", "lastname", "phone", "company"]
+    }
+    
+    try:
+        r = requests.post(search_url, headers=headers, json=search_body, timeout=30)
+        if r.status_code == 200:
+            results = r.json().get('results', [])
+            if results:
+                return results[0]
+    except:
+        pass
+    return None
+
+def search_company_by_name(api_key: str, company_name: str) -> dict:
+    """Search for existing company by name. Returns company dict or None."""
+    if not company_name:
+        return None
+    
+    headers = get_headers(api_key)
+    search_url = "https://api.hubapi.com/crm/v3/objects/companies/search"
+    search_body = {
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "name",
+                "operator": "EQ",
+                "value": company_name
+            }]
+        }],
+        "properties": ["name", "phone", "address", "city", "state", "zip", "country"]
+    }
+    
+    try:
+        r = requests.post(search_url, headers=headers, json=search_body, timeout=30)
+        if r.status_code == 200:
+            results = r.json().get('results', [])
+            if results:
+                return results[0]
+    except:
+        pass
+    return None
+
+# -----------------------------------------------------------------------------
+# UPDATE FUNCTIONS
+# -----------------------------------------------------------------------------
+def update_deal(api_key: str, deal_id: str, properties: dict) -> bool:
+    """Update deal properties. Returns success boolean."""
+    headers = get_headers(api_key)
+    url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
+    
+    try:
+        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=30)
+        return r.status_code == 200
+    except:
+        return False
+
+def update_contact(api_key: str, contact_id: str, properties: dict) -> bool:
+    """Update contact properties. Returns success boolean."""
+    headers = get_headers(api_key)
+    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+    
+    try:
+        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=30)
+        return r.status_code == 200
+    except:
+        return False
+
+def update_company(api_key: str, company_id: str, properties: dict) -> bool:
+    """Update company properties. Returns success boolean."""
+    headers = get_headers(api_key)
+    url = f"https://api.hubapi.com/crm/v3/objects/companies/{company_id}"
+    
+    try:
+        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=30)
+        return r.status_code == 200
+    except:
+        return False
+
+# -----------------------------------------------------------------------------
+# CREATE FUNCTIONS
+# -----------------------------------------------------------------------------
+def create_contact(api_key: str, email: str, first_name: str, last_name: str, 
+                   company: str, phone: str = "") -> str:
+    """Create new contact. Returns contact ID or None."""
+    headers = get_headers(api_key)
+    url = "https://api.hubapi.com/crm/v3/objects/contacts"
+    
+    properties = {"email": email}
+    if first_name:
+        properties["firstname"] = first_name
+    if last_name:
+        properties["lastname"] = last_name
+    if company:
+        properties["company"] = company
+    if phone:
+        properties["phone"] = phone
+    
+    try:
+        r = requests.post(url, headers=headers, json={"properties": properties}, timeout=30)
+        if r.status_code == 201:
+            return r.json()['id']
+    except:
+        pass
+    return None
+
+def create_company(api_key: str, name: str, phone: str = "", address: str = "",
+                   city: str = "", state: str = "", zip_code: str = "", country: str = "") -> str:
+    """Create new company. Returns company ID or None."""
+    if not name:
+        return None
+    
+    headers = get_headers(api_key)
+    url = "https://api.hubapi.com/crm/v3/objects/companies"
+    
+    properties = {"name": name}
+    if phone:
+        properties["phone"] = phone
+    if address:
+        properties["address"] = address
+    if city:
+        properties["city"] = city
+    if state:
+        properties["state"] = state
+    if zip_code:
+        properties["zip"] = zip_code
+    if country:
+        properties["country"] = country
+    
+    try:
+        r = requests.post(url, headers=headers, json={"properties": properties}, timeout=30)
+        if r.status_code == 201:
+            return r.json()['id']
+    except:
+        pass
+    return None
+
+def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: str = None) -> tuple:
+    """Create new deal. Returns (deal_id, stage_label) or (None, error_message)."""
+    headers = get_headers(api_key)
+    
+    # Get deal stage based on payment status
+    stage_id, stage_label = get_deal_stage(order)
+    
+    # Extract order details
+    order_ref = order.get('reference', '')
+    company = order.get('company') or order.get('billingCompany') or ''
+    total = order.get('total', 0) or 0
+    payment_terms = order.get('paymentTerms') or 'Standard'
+    total_owing = order.get('totalOwing', total)
+    
+    # Build deal name
+    deal_name = f"{company} - {order_ref}" if company else order_ref
+    
+    deal_data = {
+        "properties": {
+            "dealname": deal_name,
+            "amount": str(total),
+            "dealstage": stage_id,
+            "pipeline": "default",
+            "description": f"Cin7 Order: {order_ref}\nPayment Terms: {payment_terms}\nOwing: ${total_owing}"
+        }
+    }
+    
+    try:
+        r = requests.post("https://api.hubapi.com/crm/v3/objects/deals", 
+                         headers=headers, json=deal_data, timeout=30)
+        if r.status_code == 201:
+            deal_id = r.json()['id']
+            
+            # Associate with contact
+            if contact_id:
+                assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/contacts/{contact_id}/deal_to_contact"
+                requests.put(assoc_url, headers=headers, timeout=30)
+            
+            # Associate with company
+            if company_id:
+                assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/companies/{company_id}/deal_to_company"
+                requests.put(assoc_url, headers=headers, timeout=30)
+            
+            return deal_id, stage_label
+        else:
+            return None, f"Error {r.status_code}: {r.text[:100]}"
+    except Exception as e:
+        return None, str(e)
+
+# -----------------------------------------------------------------------------
+# FULL SYNC FUNCTION
+# -----------------------------------------------------------------------------
+def sync_order_to_hubspot(api_key: str, order: dict) -> dict:
+    """
+    Full sync of a single order to HubSpot.
+    - Creates or updates deal
+    - Creates or updates contact
+    - Creates or updates company
+    
+    Returns result dict with action taken and details.
+    """
+    result = {
+        "order_ref": order.get('reference', 'Unknown'),
+        "success": False,
+        "action": "none",
+        "deal_stage": "",
+        "details": []
+    }
+    
+    # Extract order info
+    order_ref = order.get('reference', '')
+    email = order.get('email') or order.get('memberEmail') or ''
+    first_name = order.get('firstName') or order.get('billingFirstName') or ''
+    last_name = order.get('lastName') or order.get('billingLastName') or ''
+    company_name = order.get('company') or order.get('billingCompany') or ''
+    phone = order.get('phone') or order.get('billingPhone') or ''
+    total = order.get('total', 0) or 0
+    
+    # Address fields
+    address = order.get('billingAddress1') or order.get('deliveryAddress1') or ''
+    city = order.get('billingCity') or order.get('deliveryCity') or ''
+    state = order.get('billingState') or order.get('deliveryState') or ''
+    zip_code = order.get('billingPostCode') or order.get('deliveryPostCode') or ''
+    country = order.get('billingCountry') or order.get('deliveryCountry') or ''
+    
+    # Get expected deal stage
+    expected_stage_id, expected_stage_label = get_deal_stage(order)
+    result["deal_stage"] = expected_stage_label
+    
+    # -------------------------------------------------------------------------
+    # STEP 1: Search for existing deal (FIRST - most common case is "already exists")
+    # -------------------------------------------------------------------------
+    existing_deal = search_deal_by_order_ref(api_key, order_ref)
+    
+    if existing_deal:
+        deal_id = existing_deal['id']
+        current_stage = existing_deal.get('properties', {}).get('dealstage', '')
+        current_amount = float(existing_deal.get('properties', {}).get('amount', 0) or 0)
+        
+        # Check if deal needs update
+        needs_update = False
+        update_props = {}
+        
+        # Check stage change (Pending Payment → Closed Won when paid)
+        if current_stage != expected_stage_id:
+            update_props["dealstage"] = expected_stage_id
+            needs_update = True
+            result["details"].append(f"Stage: {current_stage} → {expected_stage_id}")
+        
+        # Check amount change
+        if abs(current_amount - total) > 0.01:
+            update_props["amount"] = str(total)
+            needs_update = True
+            result["details"].append(f"Amount: ${current_amount:.2f} → ${total:.2f}")
+        
+        if needs_update:
+            if update_deal(api_key, deal_id, update_props):
+                result["action"] = "updated"
+                result["success"] = True
+            else:
+                result["action"] = "update_failed"
+                result["details"].append("Failed to update deal")
+        else:
+            result["action"] = "skipped"
+            result["success"] = True
+            result["details"].append("No changes needed")
+        
+        # Still sync contact and company even if deal unchanged
+        contact_id = None
+        company_id = None
+        
+    else:
+        # -------------------------------------------------------------------------
+        # STEP 2: Deal not found - need to create
+        # -------------------------------------------------------------------------
+        contact_id = None
+        company_id = None
+        
+        # -------------------------------------------------------------------------
+        # STEP 2a: Sync contact (most orders are Closed Won, so process quickly)
+        # -------------------------------------------------------------------------
+        if email:
+            existing_contact = search_contact_by_email(api_key, email)
+            
+            if existing_contact:
+                contact_id = existing_contact['id']
+                # Check if contact needs update
+                props = existing_contact.get('properties', {})
+                update_props = {}
+                
+                if first_name and props.get('firstname', '') != first_name:
+                    update_props['firstname'] = first_name
+                if last_name and props.get('lastname', '') != last_name:
+                    update_props['lastname'] = last_name
+                if phone and props.get('phone', '') != phone:
+                    update_props['phone'] = phone
+                if company_name and props.get('company', '') != company_name:
+                    update_props['company'] = company_name
+                
+                if update_props:
+                    update_contact(api_key, contact_id, update_props)
+                    result["details"].append("Contact updated")
+                else:
+                    result["details"].append("Contact unchanged")
+            else:
+                contact_id = create_contact(api_key, email, first_name, last_name, company_name, phone)
+                if contact_id:
+                    result["details"].append("Contact created")
+                else:
+                    result["details"].append("Contact creation failed")
+        
+        # -------------------------------------------------------------------------
+        # STEP 2b: Sync company
+        # -------------------------------------------------------------------------
+        if company_name:
+            existing_company = search_company_by_name(api_key, company_name)
+            
+            if existing_company:
+                company_id = existing_company['id']
+                # Check if company needs update
+                props = existing_company.get('properties', {})
+                update_props = {}
+                
+                if phone and props.get('phone', '') != phone:
+                    update_props['phone'] = phone
+                if address and props.get('address', '') != address:
+                    update_props['address'] = address
+                if city and props.get('city', '') != city:
+                    update_props['city'] = city
+                if state and props.get('state', '') != state:
+                    update_props['state'] = state
+                if zip_code and props.get('zip', '') != zip_code:
+                    update_props['zip'] = zip_code
+                
+                if update_props:
+                    update_company(api_key, company_id, update_props)
+                    result["details"].append("Company updated")
+                else:
+                    result["details"].append("Company unchanged")
+            else:
+                company_id = create_company(api_key, company_name, phone, address, city, state, zip_code, country)
+                if company_id:
+                    result["details"].append("Company created")
+                else:
+                    result["details"].append("Company creation failed")
+        
+        # -------------------------------------------------------------------------
+        # STEP 2c: Create deal
+        # -------------------------------------------------------------------------
+        deal_id, stage_or_error = create_deal(api_key, order, contact_id, company_id)
+        
+        if deal_id:
+            result["action"] = "created"
+            result["success"] = True
+            result["details"].append(f"Deal created as {stage_or_error}")
+        else:
+            result["action"] = "create_failed"
+            result["details"].append(f"Deal creation failed: {stage_or_error}")
+    
+    return result
+
+def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None) -> dict:
+    """
+    Full sync of multiple orders to HubSpot.
+    Returns detailed results dict.
+    """
+    results = {
+        "created": [],
+        "updated": [],
+        "skipped": [],
+        "failed": [],
+        "closed_won": 0,
+        "pending_payment": 0
+    }
+    
+    for i, order in enumerate(orders):
+        sync_result = sync_order_to_hubspot(api_key, order)
+        order_ref = sync_result["order_ref"]
+        
+        # Categorize result
+        if sync_result["success"]:
+            if sync_result["action"] == "created":
+                results["created"].append(sync_result)
+            elif sync_result["action"] == "updated":
+                results["updated"].append(sync_result)
+            else:  # skipped
+                results["skipped"].append(sync_result)
+            
+            # Count by stage
+            if sync_result["deal_stage"] == "Closed Won":
+                results["closed_won"] += 1
+            else:
+                results["pending_payment"] += 1
+        else:
+            results["failed"].append(sync_result)
+        
+        if progress_callback:
+            progress_callback((i + 1) / len(orders))
+    
+    return results
+
 def test_hubspot(api_key: str) -> tuple:
     try:
         r = requests.get(
@@ -262,6 +729,20 @@ def test_hubspot(api_key: str) -> tuple:
             return False, f"Error {r.status_code}"
     except Exception as e:
         return False, str(e)
+
+def fetch_pipeline_stages(api_key: str) -> list:
+    """Fetch all deal pipelines and their stages from HubSpot."""
+    try:
+        r = requests.get(
+            "https://api.hubapi.com/crm/v3/pipelines/deals",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30
+        )
+        if r.status_code == 200:
+            return r.json().get('results', [])
+    except:
+        pass
+    return []
 
 # =============================================================================
 # FILTER ORDERS
@@ -374,6 +855,8 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         'Email': order.get('email') or order.get('memberEmail') or '',
         'Order Date': (order.get('createdDate') or '')[:10],
         'Dispatched': (order.get('dispatchedDate') or '')[:10],
+        'Payment': '✅ Paid' if is_paid(order) else '⏳ Unpaid',
+        'Deal Stage': get_deal_stage(order)[1],  # "Closed Won" or "Pending Payment"
         'Status': order.get('stage') or order.get('status') or '',
     }
     
@@ -430,7 +913,7 @@ def main():
     st.markdown(f"<h1 style='text-align: center;'>{branding['company_name']}</h1>", unsafe_allow_html=True)
     
     st.subheader("Cin7 → HubSpot Order Sync")
-    st.info("This connects to real APIs and syncs wholesale orders to HubSpot as Closed Won deals.")
+    st.info("**Full Sync:** Creates/updates deals, contacts & companies. Paid → **Closed Won**. Unpaid → **Pending Payment**.")
     
     # -------------------------------------------------------------------------
     # SIDEBAR
@@ -544,6 +1027,37 @@ def main():
                     st.session_state.branding = updated_branding
                     st.success("✅ Branding saved!")
                     st.rerun()
+                
+                st.divider()
+                st.subheader("🔧 HubSpot Pipeline Stages")
+                st.caption("View your HubSpot deal stages to configure the connector")
+                
+                if hs_key:
+                    if st.button("🔍 Fetch Pipeline Stages"):
+                        pipelines = fetch_pipeline_stages(hs_key)
+                        if pipelines:
+                            for pipeline in pipelines:
+                                st.markdown(f"**📊 {pipeline['label']}** (ID: `{pipeline['id']}`)")
+                                stage_data = []
+                                for stage in pipeline.get('stages', []):
+                                    stage_data.append({
+                                        "Order": stage['displayOrder'],
+                                        "Stage Name": stage['label'],
+                                        "Stage ID": stage['id']
+                                    })
+                                st.dataframe(pd.DataFrame(stage_data), use_container_width=True, hide_index=True)
+                            
+                            st.info("""
+                            **Current configuration:**
+                            - Closed Won: `closedwon`
+                            - Pending Payment: `decisionmakerboughtin`
+                            
+                            If your stage IDs are different, update `HUBSPOT_STAGE_CLOSED_WON` and `HUBSPOT_STAGE_PENDING_PAYMENT` in the code.
+                            """)
+                        else:
+                            st.warning("Could not fetch pipelines. Check your API key.")
+                else:
+                    st.warning("Enter HubSpot API key first")
                 
             else:
                 st.caption("Admin login required to edit settings")
@@ -664,9 +1178,10 @@ def main():
             hide_index=True,
             column_config={
                 'Select': st.column_config.CheckboxColumn('Select', default=True),
-                'Total': st.column_config.NumberColumn('Total', format='$ %.2f')
+                'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
+                'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small')
             },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Status'],
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
             key="import_editor"
         )
         
@@ -716,9 +1231,10 @@ def main():
                 column_config={
                     'Select': st.column_config.CheckboxColumn('Select', default=False),
                     'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
+                    'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small'),
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
-                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Status', 'Reason'],
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
                 key="review_editor"
             )
             
@@ -749,24 +1265,92 @@ def main():
         if o.get('reference') in all_selected
     )
     
-    st.header("🚀 Push to HubSpot")
+    st.header("🚀 Sync to HubSpot")
     
     if total_selected > 0:
+        # Get selected orders
+        selected_orders = [o for o in to_import + to_review if o.get('reference') in all_selected]
+        
+        # Count by deal stage (using payment status, not terms)
+        closed_won_count = sum(1 for o in selected_orders if is_paid(o))
+        pending_count = total_selected - closed_won_count
+        
         st.success(f"**{total_selected} orders selected** — Total: ${total_selected_revenue:,.2f}")
         
+        # Show breakdown by deal stage
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Closed Won", closed_won_count, help="Fully paid orders")
+        with col2:
+            st.metric("Pending Payment", pending_count, help="Unpaid orders (Net terms)")
+        
+        if pending_count > 0:
+            st.info(f"ℹ️ {pending_count} orders have outstanding balances and will sync as **Pending Payment** deals.")
+        
+        st.caption("**Full Sync:** Creates new deals, updates existing deals, syncs contacts & companies.")
+        
         # Confirmation checkbox
-        confirm = st.checkbox(f"I confirm I want to push {total_selected} orders to HubSpot", key="confirm_push")
+        confirm = st.checkbox(f"I confirm I want to sync {total_selected} orders to HubSpot", key="confirm_push")
         
         if st.button(
-            f"🚀 PUSH {total_selected} ORDERS TO HUBSPOT (${total_selected_revenue:,.0f})",
+            f"🔄 SYNC {total_selected} ORDERS TO HUBSPOT (${total_selected_revenue:,.0f})",
             type="primary",
             use_container_width=True,
-            disabled=not confirm
+            disabled=not confirm or not hs_key
         ):
-            st.warning("🎭 **DEMO MODE** — No data was written. In production, this would create deals in HubSpot.")
-            st.balloons()
+            if not hs_key:
+                st.error("Enter HubSpot API key in sidebar")
+            else:
+                # Push to HubSpot with progress bar
+                progress_bar = st.progress(0, text="Syncing orders to HubSpot...")
+                
+                def update_progress(pct):
+                    progress_bar.progress(pct, text=f"Syncing orders... {int(pct*100)}%")
+                
+                results = push_orders_to_hubspot(hs_key, selected_orders, update_progress)
+                
+                progress_bar.empty()
+                
+                # Show results summary
+                created_count = len(results["created"])
+                updated_count = len(results["updated"])
+                skipped_count = len(results["skipped"])
+                failed_count = len(results["failed"])
+                
+                st.markdown(f"""
+                ### Sync Results
+                
+                | Action | Count | Description |
+                |--------|-------|-------------|
+                | ✅ Created | {created_count} | New deals created |
+                | 🔄 Updated | {updated_count} | Existing deals updated |
+                | ⏭️ Skipped | {skipped_count} | No changes needed |
+                | ❌ Failed | {failed_count} | Errors occurred |
+                
+                | Stage | Count |
+                |-------|-------|
+                | Closed Won | {results['closed_won']} |
+                | Pending Payment | {results['pending_payment']} |
+                """)
+                
+                # Show details for updated orders (most interesting)
+                if results["updated"]:
+                    with st.expander(f"🔄 Updated Deals ({updated_count})"):
+                        for item in results["updated"]:
+                            st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
+                
+                # Show details for failed orders
+                if results["failed"]:
+                    with st.expander(f"❌ Failed ({failed_count})", expanded=True):
+                        for item in results["failed"][:10]:
+                            st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
+                        if failed_count > 10:
+                            st.caption(f"...and {failed_count - 10} more")
+                
+                if failed_count == 0:
+                    st.balloons()
     else:
-        st.warning("No orders selected. Check orders above to include them in the push.")
+        st.warning("No orders selected. Check orders above to include them in the sync.")
     
     st.divider()
     
