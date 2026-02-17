@@ -1246,13 +1246,9 @@ def main():
     review_revenue = sum(o.get('total', 0) or 0 for o in to_review)
     retail_revenue = sum(o.get('total', 0) or 0 for o in retail_orders)
     
-    # Initialize selections (import orders pre-selected, review orders not)
+    # Reference sets for push button logic
     import_refs = {o.get('reference') for o in to_import}
     review_refs = {o.get('reference') for o in to_review}
-    
-    # If selections are empty, pre-select all import orders
-    if not st.session_state.selected_import and to_import:
-        st.session_state.selected_import = import_refs.copy()
     
     st.divider()
     
@@ -1277,63 +1273,32 @@ def main():
     # SECTION 1: READY TO IMPORT (pre-selected)
     # -------------------------------------------------------------------------
     st.header(f"✅ Ready to Import ({len(to_import)} orders)")
-    st.caption("These orders passed all filters and are pre-selected for import. Click column headers to sort.")
+    st.caption("These orders passed all filters and are pre-selected for import.")
     
     if to_import:
-        # Initialize toggle counter if not exists
-        if 'import_toggle_count' not in st.session_state:
-            st.session_state.import_toggle_count = 0
-        
-        # Calculate current selection state
-        selected_count = len(st.session_state.selected_import & import_refs)
-        all_selected = selected_count == len(import_refs)
-        
-        # Simple checkbox for select/deselect all
-        select_all = st.checkbox(
-            "Select all orders", 
-            value=all_selected,
-            key=f"select_all_import_{st.session_state.import_toggle_count}"
+        # Single checkbox - that's it
+        include_import = st.checkbox(
+            f"☑ Include all {len(to_import)} orders (${import_revenue:,.2f})",
+            value=True,
+            key="include_import"
         )
         
-        # If checkbox state doesn't match current state, update and force refresh
-        if select_all and not all_selected:
+        # Update selection
+        if include_import:
             st.session_state.selected_import = import_refs.copy()
-            st.session_state.import_toggle_count += 1
-            st.rerun()
-        elif not select_all and all_selected:
+        else:
             st.session_state.selected_import = set()
-            st.session_state.import_toggle_count += 1
-            st.rerun()
         
-        # Create dataframe with Select column
+        # Read-only table
         df_import = prepare_dataframe(to_import)
-        df_import.insert(0, 'Select', df_import['Order #'].apply(lambda x: x in st.session_state.selected_import))
-        
-        # Editable dataframe - key changes when toggle is used to force reset
-        edited_import = st.data_editor(
+        st.dataframe(
             df_import,
             use_container_width=True,
             hide_index=True,
             column_config={
-                'Select': st.column_config.CheckboxColumn('Select', default=True),
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
-                'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small')
-            },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
-            key=f"import_editor_{st.session_state.import_toggle_count}"
+            }
         )
-        
-        # Update selections from data editor
-        st.session_state.selected_import = set(edited_import[edited_import['Select']]['Order #'].tolist())
-        
-        # Show count of selected
-        selected_import_count = len(st.session_state.selected_import & import_refs)
-        selected_import_total = sum(
-            (o.get('total', 0) or 0) 
-            for o in to_import 
-            if o.get('reference') in st.session_state.selected_import
-        )
-        st.caption(f"✓ {selected_import_count} of {len(to_import)} selected (${selected_import_total:,.2f})")
     else:
         st.info("No orders ready to import")
     
@@ -1343,64 +1308,32 @@ def main():
     # SECTION 2: NEEDS REVIEW (not pre-selected, collapsed by default)
     # -------------------------------------------------------------------------
     with st.expander(f"⚠️ Needs Review ({len(to_review)} orders) — Click to expand"):
-        st.caption("These orders need manual review before import — check the box to include. Click column headers to sort.")
+        st.caption("These orders need manual review before import.")
         
         if to_review:
-            # Initialize toggle counter if not exists
-            if 'review_toggle_count' not in st.session_state:
-                st.session_state.review_toggle_count = 0
-            
-            # Calculate current selection state
-            selected_review_count = len(st.session_state.selected_review & review_refs)
-            all_selected_review = selected_review_count == len(review_refs)
-            
-            # Simple checkbox for select/deselect all
-            select_all_review = st.checkbox(
-                "Select all orders", 
-                value=all_selected_review,
-                key=f"select_all_review_{st.session_state.review_toggle_count}"
+            # Single checkbox - unchecked by default
+            include_review = st.checkbox(
+                f"☐ Include all {len(to_review)} review orders (${review_revenue:,.2f})",
+                value=False,
+                key="include_review"
             )
             
-            # If checkbox state doesn't match current state, update and force refresh
-            if select_all_review and not all_selected_review:
+            # Update selection
+            if include_review:
                 st.session_state.selected_review = review_refs.copy()
-                st.session_state.review_toggle_count += 1
-                st.rerun()
-            elif not select_all_review and all_selected_review:
+            else:
                 st.session_state.selected_review = set()
-                st.session_state.review_toggle_count += 1
-                st.rerun()
             
-            # Create dataframe with Select column and Reason
+            # Read-only table
             df_review = prepare_dataframe(to_review, include_reason=True)
-            df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
-            
-            # Editable dataframe - key changes when toggle is used to force reset
-            edited_review = st.data_editor(
+            st.dataframe(
                 df_review,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    'Select': st.column_config.CheckboxColumn('Select', default=False),
                     'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
-                    'Deal Stage': st.column_config.TextColumn('Deal Stage', width='small'),
-                    'Reason': st.column_config.TextColumn('Reason', width='medium')
-                },
-                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
-                key=f"review_editor_{st.session_state.review_toggle_count}"
+                }
             )
-            
-            # Update selections from data editor
-            st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
-            
-            # Show count of selected
-            selected_review_count = len(st.session_state.selected_review & review_refs)
-            selected_review_total = sum(
-                (o.get('total', 0) or 0) 
-                for o in to_review 
-                if o.get('reference') in st.session_state.selected_review
-            )
-            st.caption(f"✓ {selected_review_count} of {len(to_review)} selected (${selected_review_total:,.2f})")
         else:
             st.info("No orders need review")
     
