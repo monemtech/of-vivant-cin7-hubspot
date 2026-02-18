@@ -571,6 +571,73 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
     except Exception as e:
         return None, str(e)
 
+def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
+    """
+    Create line items for a deal from Cin7 order data.
+    Returns (count_created, errors_list)
+    """
+    headers = get_headers(api_key)
+    line_items = order.get('lineItems', [])
+    
+    if not line_items:
+        return 0, []
+    
+    created = 0
+    errors = []
+    
+    for item in line_items:
+        # Extract line item details from Cin7
+        product_name = item.get('name') or item.get('productName') or item.get('description') or 'Product'
+        sku = item.get('code') or item.get('sku') or item.get('productCode') or ''
+        quantity = item.get('qty') or item.get('quantity') or 1
+        unit_price = item.get('unitPrice') or item.get('price') or 0
+        discount = item.get('discount') or 0
+        total = item.get('total') or item.get('lineTotal') or (float(quantity) * float(unit_price))
+        
+        # Build line item name with SKU if available
+        if sku:
+            name = f"{product_name} ({sku})"
+        else:
+            name = product_name
+        
+        # Create line item in HubSpot
+        line_item_data = {
+            "properties": {
+                "name": name[:250],  # HubSpot limit
+                "quantity": str(quantity),
+                "price": str(unit_price),
+                "amount": str(total),
+                "hs_product_id": None,  # No product catalog
+            }
+        }
+        
+        # Add discount if present
+        if discount and float(discount) > 0:
+            line_item_data["properties"]["discount"] = str(discount)
+        
+        try:
+            # Create the line item
+            r = requests.post(
+                "https://api.hubapi.com/crm/v3/objects/line_items",
+                headers=headers,
+                json=line_item_data,
+                timeout=30
+            )
+            
+            if r.status_code == 201:
+                line_item_id = r.json()['id']
+                
+                # Associate line item with deal
+                assoc_url = f"https://api.hubapi.com/crm/v3/objects/line_items/{line_item_id}/associations/deals/{deal_id}/line_item_to_deal"
+                requests.put(assoc_url, headers=headers, timeout=30)
+                created += 1
+            else:
+                errors.append(f"Failed to create line item '{name}': {r.status_code}")
+        except Exception as e:
+            errors.append(f"Error creating line item '{name}': {str(e)}")
+    
+    return created, errors
+
 # -----------------------------------------------------------------------------
 # FULL SYNC FUNCTION
 # -----------------------------------------------------------------------------
@@ -737,6 +804,15 @@ def sync_order_to_hubspot(api_key: str, order: dict) -> dict:
             result["action"] = "created"
             result["success"] = True
             result["details"].append(f"Deal created as {stage_or_error}")
+            
+            # -------------------------------------------------------------------------
+            # STEP 2d: Create line items
+            # -------------------------------------------------------------------------
+            line_items_created, line_errors = create_line_items(api_key, deal_id, order)
+            if line_items_created > 0:
+                result["details"].append(f"{line_items_created} line items added")
+            if line_errors:
+                result["details"].append(f"Line item errors: {len(line_errors)}")
         else:
             result["action"] = "create_failed"
             result["details"].append(f"Deal creation failed: {stage_or_error}")
