@@ -546,8 +546,240 @@ def create_contact(api_key: str, email: str, first_name: str, last_name: str,
         pass
     return None
 
+def get_hubspot_owners(api_key: str) -> dict:
+    """
+    Fetch all HubSpot owners and return email → owner_id lookup dict.
+    """
+    headers = get_headers(api_key)
+    owners = {}
+    
+    try:
+        r = requests.get(
+            "https://api.hubapi.com/crm/v3/owners",
+            headers=headers,
+            params={"limit": 100},
+            timeout=15
+        )
+        if r.status_code == 200:
+            for owner in r.json().get('results', []):
+                email = owner.get('email', '').lower()
+                owner_id = owner.get('id')
+                if email and owner_id:
+                    owners[email] = owner_id
+    except:
+        pass
+    
+    return owners
+
+def bulk_update_company_owners(api_key: str, company_to_rep: dict, owner_lookup: dict) -> tuple:
+    """
+    Bulk update HubSpot company owners based on company name → rep email mapping.
+    Returns (updated_count, skipped_count, error_count)
+    """
+    headers = get_headers(api_key)
+    updated = 0
+    skipped = 0
+    errors = 0
+    
+    # Fetch all companies from HubSpot (paginated)
+    all_companies = []
+    after = None
+    
+    while True:
+        params = {"limit": 100, "properties": "name,hubspot_owner_id"}
+        if after:
+            params["after"] = after
+        
+        try:
+            r = requests.get(
+                "https://api.hubapi.com/crm/v3/objects/companies",
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            if r.status_code == 200:
+                data = r.json()
+                all_companies.extend(data.get('results', []))
+                
+                # Check for next page
+                paging = data.get('paging', {})
+                if paging.get('next', {}).get('after'):
+                    after = paging['next']['after']
+                else:
+                    break
+            else:
+                break
+        except:
+            break
+    
+    # Update each company
+    for company in all_companies:
+        company_id = company.get('id')
+        company_name = (company.get('properties', {}).get('name') or '').strip().upper()
+        current_owner = company.get('properties', {}).get('hubspot_owner_id')
+        
+        # Look up rep email by company name
+        rep_email = company_to_rep.get(company_name)
+        
+        if not rep_email:
+            skipped += 1
+            continue
+        
+        # Look up HubSpot owner ID by rep email
+        new_owner_id = owner_lookup.get(rep_email)
+        
+        if not new_owner_id:
+            skipped += 1
+            continue
+        
+        # Skip if owner already set correctly
+        if current_owner == new_owner_id:
+            skipped += 1
+            continue
+        
+        # Update the company owner
+        try:
+            r = requests.patch(
+                f"https://api.hubapi.com/crm/v3/objects/companies/{company_id}",
+                headers=headers,
+                json={"properties": {"hubspot_owner_id": new_owner_id}},
+                timeout=15
+            )
+            if r.status_code == 200:
+                updated += 1
+            else:
+                errors += 1
+        except:
+            errors += 1
+    
+    return updated, skipped, errors
+
+def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: dict) -> tuple:
+    """
+    Bulk update HubSpot deal owners based on associated company name → rep email mapping.
+    Returns (updated_count, skipped_count, error_count)
+    """
+    headers = get_headers(api_key)
+    updated = 0
+    skipped = 0
+    errors = 0
+    
+    # Fetch all deals from HubSpot with company associations (paginated)
+    all_deals = []
+    after = None
+    
+    while True:
+        params = {
+            "limit": 100, 
+            "properties": "dealname,hubspot_owner_id",
+            "associations": "companies"
+        }
+        if after:
+            params["after"] = after
+        
+        try:
+            r = requests.get(
+                "https://api.hubapi.com/crm/v3/objects/deals",
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            if r.status_code == 200:
+                data = r.json()
+                all_deals.extend(data.get('results', []))
+                
+                # Check for next page
+                paging = data.get('paging', {})
+                if paging.get('next', {}).get('after'):
+                    after = paging['next']['after']
+                else:
+                    break
+            else:
+                break
+        except:
+            break
+    
+    # Build company ID → name lookup
+    company_id_to_name = {}
+    after = None
+    while True:
+        params = {"limit": 100, "properties": "name"}
+        if after:
+            params["after"] = after
+        try:
+            r = requests.get(
+                "https://api.hubapi.com/crm/v3/objects/companies",
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            if r.status_code == 200:
+                data = r.json()
+                for c in data.get('results', []):
+                    company_id_to_name[c['id']] = (c.get('properties', {}).get('name') or '').strip().upper()
+                paging = data.get('paging', {})
+                if paging.get('next', {}).get('after'):
+                    after = paging['next']['after']
+                else:
+                    break
+            else:
+                break
+        except:
+            break
+    
+    # Update each deal
+    for deal in all_deals:
+        deal_id = deal.get('id')
+        current_owner = deal.get('properties', {}).get('hubspot_owner_id')
+        
+        # Get associated company
+        associations = deal.get('associations', {}).get('companies', {}).get('results', [])
+        if not associations:
+            skipped += 1
+            continue
+        
+        company_id = associations[0].get('id')
+        company_name = company_id_to_name.get(company_id, '')
+        
+        # Look up rep email by company name
+        rep_email = company_to_rep.get(company_name)
+        
+        if not rep_email:
+            skipped += 1
+            continue
+        
+        # Look up HubSpot owner ID by rep email
+        new_owner_id = owner_lookup.get(rep_email)
+        
+        if not new_owner_id:
+            skipped += 1
+            continue
+        
+        # Skip if owner already set correctly
+        if current_owner == new_owner_id:
+            skipped += 1
+            continue
+        
+        # Update the deal owner
+        try:
+            r = requests.patch(
+                f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}",
+                headers=headers,
+                json={"properties": {"hubspot_owner_id": new_owner_id}},
+                timeout=15
+            )
+            if r.status_code == 200:
+                updated += 1
+            else:
+                errors += 1
+        except:
+            errors += 1
+    
+    return updated, skipped, errors
+
 def create_company(api_key: str, name: str, phone: str = "", address: str = "",
-                   city: str = "", state: str = "", zip_code: str = "", country: str = "") -> str:
+                   city: str = "", state: str = "", zip_code: str = "", country: str = "",
+                   owner_id: str = None) -> str:
     """Create new company. Returns company ID or None."""
     if not name:
         return None
@@ -568,6 +800,8 @@ def create_company(api_key: str, name: str, phone: str = "", address: str = "",
         properties["zip"] = zip_code
     if country:
         properties["country"] = country
+    if owner_id:
+        properties["hubspot_owner_id"] = owner_id
     
     try:
         r = requests.post(url, headers=headers, json={"properties": properties}, timeout=15)
@@ -577,7 +811,7 @@ def create_company(api_key: str, name: str, phone: str = "", address: str = "",
         pass
     return None
 
-def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: str = None) -> tuple:
+def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: str = None, owner_id: str = None) -> tuple:
     """Create new deal. Returns (deal_id, stage_label) or (None, error_message)."""
     headers = get_headers(api_key)
     
@@ -603,6 +837,10 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
             "description": f"Cin7 Order: {order_ref}\nPayment Terms: {payment_terms}\nOwing: ${total_owing}"
         }
     }
+    
+    # Set deal owner if provided
+    if owner_id:
+        deal_data["properties"]["hubspot_owner_id"] = owner_id
     
     try:
         r = requests.post("https://api.hubapi.com/crm/v3/objects/deals", 
@@ -722,7 +960,8 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
 # FULL SYNC FUNCTION
 # -----------------------------------------------------------------------------
 def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, cin7_api_key: str = None,
-                          contact_cache: dict = None, company_cache: dict = None, cache_lock = None) -> dict:
+                          contact_cache: dict = None, company_cache: dict = None, cache_lock = None,
+                          owner_lookup: dict = None) -> dict:
     """
     Full sync of a single order to HubSpot.
     - Creates or updates deal
@@ -731,6 +970,7 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
     - Creates line items
     
     Uses optional caches to avoid redundant contact/company lookups.
+    Uses owner_lookup to map Cin7 Sales Rep to HubSpot Deal Owner.
     Returns result dict with action taken and details.
     """
     result = {
@@ -756,6 +996,14 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
     state = order.get('billingState') or order.get('deliveryState') or ''
     zip_code = order.get('billingPostCode') or order.get('deliveryPostCode') or ''
     country = order.get('billingCountry') or order.get('deliveryCountry') or ''
+    
+    # Sales Rep → HubSpot Owner mapping
+    sales_rep_email = (order.get('salesPersonEmail') or '').lower()
+    owner_id = None
+    if sales_rep_email and owner_lookup:
+        owner_id = owner_lookup.get(sales_rep_email)
+        if owner_id:
+            result["details"].append(f"Rep: {sales_rep_email.split('@')[0]}")
     
     # Get expected deal stage
     expected_stage_id, expected_stage_label = get_deal_stage(order)
@@ -915,7 +1163,8 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
                     else:
                         result["details"].append("Company unchanged")
                 else:
-                    company_id = create_company(api_key, company_name, phone, address, city, state, zip_code, country)
+                    # Set Company Owner only on first creation
+                    company_id = create_company(api_key, company_name, phone, address, city, state, zip_code, country, owner_id)
                     if company_id:
                         result["details"].append("Company created")
                     else:
@@ -927,9 +1176,9 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
                         company_cache[company_name.lower()] = company_id
         
         # -------------------------------------------------------------------------
-        # STEP 2c: Create deal
+        # STEP 2c: Create deal (with Sales Rep as Deal Owner)
         # -------------------------------------------------------------------------
-        deal_id, stage_or_error = create_deal(api_key, order, contact_id, company_id)
+        deal_id, stage_or_error = create_deal(api_key, order, contact_id, company_id, owner_id)
         
         if deal_id:
             result["action"] = "created"
@@ -968,6 +1217,9 @@ def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None,
         "pending_payment": 0
     }
     
+    # Fetch HubSpot owners for Sales Rep → Deal Owner mapping
+    owner_lookup = get_hubspot_owners(api_key)
+    
     # Thread-safe caches to avoid redundant API calls
     contact_cache = {}  # email -> contact_id
     company_cache = {}  # company_name -> company_id
@@ -980,7 +1232,7 @@ def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None,
     def process_order(order):
         """Process a single order and return result."""
         return sync_order_to_hubspot(api_key, order, cin7_username, cin7_api_key, 
-                                     contact_cache, company_cache, cache_lock)
+                                     contact_cache, company_cache, cache_lock, owner_lookup)
     
     # Use ThreadPoolExecutor for parallel processing
     # Limit to 5 concurrent requests to avoid HubSpot rate limits
@@ -1376,6 +1628,88 @@ def main():
                         st.rerun()
                     else:
                         st.error("❌ Invalid credentials")
+        
+        # -------------------------------------------------------------------------
+        # BULK OWNER SYNC TOOL
+        # -------------------------------------------------------------------------
+        with st.expander("👥 Bulk Owner Sync (One-Time Setup)"):
+            st.caption("Update existing HubSpot Companies and Deals with correct owners based on your mapping spreadsheet")
+            
+            if not hs_key:
+                st.warning("Enter HubSpot API key first")
+            else:
+                # File uploader for mapping spreadsheet
+                uploaded_file = st.file_uploader(
+                    "Upload Company → Owner mapping spreadsheet (Excel)",
+                    type=['xlsx', 'xls'],
+                    key="owner_mapping_file"
+                )
+                
+                if uploaded_file:
+                    try:
+                        import pandas as pd
+                        df = pd.read_excel(uploaded_file)
+                        
+                        # Check required columns
+                        required_cols = ['Company Name', 'Rep Email']
+                        if not all(col in df.columns for col in required_cols):
+                            st.error(f"Spreadsheet must have columns: {required_cols}")
+                        else:
+                            # Build company → rep email mapping
+                            company_to_rep = {}
+                            for _, row in df.iterrows():
+                                company = str(row.get('Company Name', '')).strip().upper()
+                                rep_email = str(row.get('Rep Email', '')).strip().lower()
+                                if company and rep_email and rep_email != 'nan':
+                                    company_to_rep[company] = rep_email
+                            
+                            st.success(f"✅ Loaded {len(company_to_rep)} company → rep mappings")
+                            
+                            # Show preview
+                            with st.expander("Preview mappings (first 10)"):
+                                preview_items = list(company_to_rep.items())[:10]
+                                for company, email in preview_items:
+                                    st.caption(f"• {company} → {email}")
+                            
+                            # Fetch HubSpot owners
+                            owner_lookup = get_hubspot_owners(hs_key)
+                            if owner_lookup:
+                                st.info(f"Found {len(owner_lookup)} HubSpot owners")
+                            else:
+                                st.warning("Could not fetch HubSpot owners")
+                            
+                            st.divider()
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                if st.button("🔄 Sync Company Owners", type="primary"):
+                                    with st.spinner("Updating company owners..."):
+                                        updated, skipped, errors = bulk_update_company_owners(
+                                            hs_key, company_to_rep, owner_lookup
+                                        )
+                                    
+                                    st.success(f"✅ Updated: {updated} companies")
+                                    if skipped:
+                                        st.info(f"⏭️ Skipped: {skipped} (no match or already set)")
+                                    if errors:
+                                        st.warning(f"⚠️ Errors: {errors}")
+                            
+                            with col2:
+                                if st.button("🔄 Sync Deal Owners", type="primary"):
+                                    with st.spinner("Updating deal owners..."):
+                                        updated, skipped, errors = bulk_update_deal_owners(
+                                            hs_key, company_to_rep, owner_lookup
+                                        )
+                                    
+                                    st.success(f"✅ Updated: {updated} deals")
+                                    if skipped:
+                                        st.info(f"⏭️ Skipped: {skipped} (no match or already set)")
+                                    if errors:
+                                        st.warning(f"⚠️ Errors: {errors}")
+                            
+                    except Exception as e:
+                        st.error(f"Error reading file: {str(e)}")
     
     # -------------------------------------------------------------------------
     # MAIN CONTENT
@@ -1525,9 +1859,11 @@ def main():
                 selected_order = order_options[selected_order_name]
                 order_id = selected_order.get('id')
                 order_ref = selected_order.get('reference')
+                sales_rep = selected_order.get('salesPersonEmail', 'Not assigned')
                 
                 st.write(f"**Order Reference:** {order_ref}")
                 st.write(f"**Order ID:** {order_id}")
+                st.write(f"**Sales Rep (→ Deal Owner):** {sales_rep}")
                 
                 # Show what fields we already have from the list API
                 st.subheader("Fields from List API (already loaded):")
