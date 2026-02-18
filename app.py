@@ -620,10 +620,16 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
     Returns (count_created, errors_list)
     """
     headers = get_headers(api_key)
-    line_items = order.get('lineItems', [])
+    
+    # Check multiple possible field names for line items
+    line_items = None
+    for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
+        if field_name in order and order[field_name]:
+            line_items = order[field_name]
+            break
     
     if not line_items:
-        return 0, []
+        return 0, [f"No line items found. Available keys: {list(order.keys())[:15]}"]
     
     created = 0
     errors = []
@@ -767,19 +773,30 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         
         if not existing_line_items:
             # No line items - fetch from Cin7 and add them
+            result["details"].append(f"DEBUG: No line items found, fetching from Cin7...")
             if cin7_username and cin7_api_key:
                 order_id = order.get('id')
+                result["details"].append(f"DEBUG: Order ID = {order_id}")
                 if order_id:
                     detailed_order = fetch_order_details(cin7_username, cin7_api_key, order_id)
                     if detailed_order:
+                        result["details"].append(f"DEBUG: Got detailed order, keys = {list(detailed_order.keys())[:10]}")
                         line_items_created, line_errors = create_line_items(api_key, deal_id, detailed_order)
                         if line_items_created > 0:
                             result["details"].append(f"{line_items_created} line items added")
                             # If we added line items, mark as updated (not skipped)
                             if result["action"] == "skipped":
                                 result["action"] = "updated"
+                        else:
+                            result["details"].append("DEBUG: No line items created")
                         if line_errors:
-                            result["details"].append(f"Line item errors: {len(line_errors)}")
+                            result["details"].append(f"Line item errors: {line_errors[:3]}")  # Show first 3 errors
+                    else:
+                        result["details"].append("DEBUG: Failed to fetch detailed order")
+                else:
+                    result["details"].append("DEBUG: No order ID found")
+            else:
+                result["details"].append("DEBUG: Missing Cin7 credentials")
         else:
             result["details"].append(f"{len(existing_line_items)} line items already exist")
         
@@ -888,10 +905,8 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
             line_items_created, line_errors = create_line_items(api_key, deal_id, order_with_lines)
             if line_items_created > 0:
                 result["details"].append(f"{line_items_created} line items added")
-            elif not order_with_lines.get('lineItems'):
-                result["details"].append("No line items in order")
             if line_errors:
-                result["details"].append(f"Line item errors: {len(line_errors)}")
+                result["details"].append(f"Line item errors: {line_errors[:3]}")
         else:
             result["action"] = "create_failed"
             result["details"].append(f"Deal creation failed: {stage_or_error}")
@@ -1431,6 +1446,67 @@ def main():
     st.divider()
     
     # -------------------------------------------------------------------------
+    # LINE ITEMS PREVIEW (Debug tool)
+    # -------------------------------------------------------------------------
+    with st.expander("🔍 Preview Line Items (Debug Tool)"):
+        st.caption("Test fetching line items from Cin7 before syncing to HubSpot")
+        
+        # Create dropdown of orders
+        all_orders = to_import + to_review
+        if all_orders:
+            order_options = {f"{o.get('reference')} - {o.get('company', 'Unknown')} (${o.get('total', 0):,.2f})": o for o in all_orders}
+            selected_order_name = st.selectbox("Select an order to preview:", list(order_options.keys()))
+            
+            if st.button("🔎 Fetch Line Items from Cin7", key="preview_line_items"):
+                selected_order = order_options[selected_order_name]
+                order_id = selected_order.get('id')
+                order_ref = selected_order.get('reference')
+                
+                if order_id:
+                    with st.spinner(f"Fetching details for {order_ref}..."):
+                        detailed_order = fetch_order_details(cin7_user, cin7_key, order_id)
+                    
+                    if detailed_order:
+                        st.success(f"✅ Successfully fetched order details")
+                        
+                        # Show all available keys
+                        st.subheader("Available Fields in Order:")
+                        st.code(list(detailed_order.keys()))
+                        
+                        # Check for line items under various field names
+                        line_items_field = None
+                        for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
+                            if field_name in detailed_order and detailed_order[field_name]:
+                                line_items_field = field_name
+                                break
+                        
+                        if line_items_field:
+                            line_items = detailed_order[line_items_field]
+                            st.subheader(f"✅ Found Line Items (field: '{line_items_field}')")
+                            st.write(f"**{len(line_items)} line items found**")
+                            
+                            # Show line items as table
+                            for i, item in enumerate(line_items):
+                                st.write(f"**Item {i+1}:**")
+                                st.json(item)
+                        else:
+                            st.warning("⚠️ No line items found under common field names")
+                            st.write("Checking all fields for arrays that might be line items:")
+                            for key, value in detailed_order.items():
+                                if isinstance(value, list) and len(value) > 0:
+                                    st.write(f"- **{key}**: {len(value)} items")
+                                    if len(value) > 0 and isinstance(value[0], dict):
+                                        st.write(f"  First item keys: {list(value[0].keys())}")
+                    else:
+                        st.error(f"❌ Failed to fetch order details for ID: {order_id}")
+                else:
+                    st.error("❌ No order ID found in order data")
+        else:
+            st.info("No orders loaded yet")
+    
+    st.divider()
+    
+    # -------------------------------------------------------------------------
     # SECTION 1: READY TO IMPORT (pre-selected)
     # -------------------------------------------------------------------------
     st.header(f"✅ Ready to Import ({len(to_import)} orders)")
@@ -1610,6 +1686,14 @@ def main():
                         with st.expander(f"🔄 Updated Deals ({updated_count})"):
                             for item in results["updated"]:
                                 st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
+                    
+                    # Show details for skipped orders (shows line item status)
+                    if results["skipped"]:
+                        with st.expander(f"⏭️ Skipped Deals ({skipped_count}) - already synced"):
+                            for item in results["skipped"][:20]:
+                                st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
+                            if skipped_count > 20:
+                                st.caption(f"...and {skipped_count - 20} more")
                     
                     # Show details for failed orders
                     if results["failed"]:
