@@ -278,6 +278,29 @@ def fetch_orders(username: str, api_key: str, since: datetime, until: datetime,
     
     return all_orders
 
+def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
+    """
+    Fetch detailed order info from Cin7 including line items.
+    The list API doesn't return line items, so we need to fetch individual orders.
+    """
+    try:
+        r = requests.get(
+            f"https://api.cin7.com/api/v1/SalesOrders",
+            auth=(username, api_key),
+            params={"where": f"id='{order_id}'"},
+            timeout=30
+        )
+        if r.status_code == 200:
+            data = r.json()
+            # API returns a list, get first item
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            elif isinstance(data, dict):
+                return data
+    except:
+        pass
+    return None
+
 # =============================================================================
 # HUBSPOT API - FULL SYNC SYSTEM
 # =============================================================================
@@ -571,6 +594,26 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
     except Exception as e:
         return None, str(e)
 
+def get_deal_line_items(api_key: str, deal_id: str) -> list:
+    """
+    Get existing line items for a deal.
+    Returns list of line items or empty list.
+    """
+    headers = get_headers(api_key)
+    
+    try:
+        # Get line items associated with this deal
+        url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/line_items"
+        r = requests.get(url, headers=headers, timeout=30)
+        
+        if r.status_code == 200:
+            results = r.json().get('results', [])
+            return results
+    except:
+        pass
+    
+    return []
+
 def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
     """
     Create line items for a deal from Cin7 order data.
@@ -641,12 +684,13 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
 # -----------------------------------------------------------------------------
 # FULL SYNC FUNCTION
 # -----------------------------------------------------------------------------
-def sync_order_to_hubspot(api_key: str, order: dict) -> dict:
+def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, cin7_api_key: str = None) -> dict:
     """
     Full sync of a single order to HubSpot.
     - Creates or updates deal
     - Creates or updates contact
     - Creates or updates company
+    - Creates line items (fetches from Cin7 if credentials provided)
     
     Returns result dict with action taken and details.
     """
@@ -715,6 +759,29 @@ def sync_order_to_hubspot(api_key: str, order: dict) -> dict:
             result["action"] = "skipped"
             result["success"] = True
             result["details"].append("No changes needed")
+        
+        # -------------------------------------------------------------------------
+        # Check if existing deal is missing line items
+        # -------------------------------------------------------------------------
+        existing_line_items = get_deal_line_items(api_key, deal_id)
+        
+        if not existing_line_items:
+            # No line items - fetch from Cin7 and add them
+            if cin7_username and cin7_api_key:
+                order_id = order.get('id')
+                if order_id:
+                    detailed_order = fetch_order_details(cin7_username, cin7_api_key, order_id)
+                    if detailed_order:
+                        line_items_created, line_errors = create_line_items(api_key, deal_id, detailed_order)
+                        if line_items_created > 0:
+                            result["details"].append(f"{line_items_created} line items added")
+                            # If we added line items, mark as updated (not skipped)
+                            if result["action"] == "skipped":
+                                result["action"] = "updated"
+                        if line_errors:
+                            result["details"].append(f"Line item errors: {len(line_errors)}")
+        else:
+            result["details"].append(f"{len(existing_line_items)} line items already exist")
         
         # Still sync contact and company even if deal unchanged
         contact_id = None
@@ -806,11 +873,23 @@ def sync_order_to_hubspot(api_key: str, order: dict) -> dict:
             result["details"].append(f"Deal created as {stage_or_error}")
             
             # -------------------------------------------------------------------------
-            # STEP 2d: Create line items
+            # STEP 2d: Create line items (fetch from Cin7 if credentials provided)
             # -------------------------------------------------------------------------
-            line_items_created, line_errors = create_line_items(api_key, deal_id, order)
+            order_with_lines = order
+            
+            # Fetch detailed order from Cin7 to get line items
+            if cin7_username and cin7_api_key:
+                order_id = order.get('id')
+                if order_id:
+                    detailed_order = fetch_order_details(cin7_username, cin7_api_key, order_id)
+                    if detailed_order:
+                        order_with_lines = detailed_order
+            
+            line_items_created, line_errors = create_line_items(api_key, deal_id, order_with_lines)
             if line_items_created > 0:
                 result["details"].append(f"{line_items_created} line items added")
+            elif not order_with_lines.get('lineItems'):
+                result["details"].append("No line items in order")
             if line_errors:
                 result["details"].append(f"Line item errors: {len(line_errors)}")
         else:
@@ -819,9 +898,11 @@ def sync_order_to_hubspot(api_key: str, order: dict) -> dict:
     
     return result
 
-def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None) -> dict:
+def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None, 
+                           cin7_username: str = None, cin7_api_key: str = None) -> dict:
     """
     Full sync of multiple orders to HubSpot.
+    If Cin7 credentials provided, will fetch order details for line items.
     Returns detailed results dict.
     """
     results = {
@@ -834,7 +915,7 @@ def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None) -
     }
     
     for i, order in enumerate(orders):
-        sync_result = sync_order_to_hubspot(api_key, order)
+        sync_result = sync_order_to_hubspot(api_key, order, cin7_username, cin7_api_key)
         order_ref = sync_result["order_ref"]
         
         # Categorize result
@@ -1484,7 +1565,13 @@ def main():
                     )
                 
                 try:
-                    results = push_orders_to_hubspot(hs_key, selected_orders, update_progress)
+                    results = push_orders_to_hubspot(
+                        hs_key, 
+                        selected_orders, 
+                        update_progress,
+                        cin7_username=cin7_user,
+                        cin7_api_key=cin7_key
+                    )
                     
                     # Clean up progress indicators
                     progress_bar.empty()
