@@ -688,7 +688,6 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
                 "quantity": str(quantity),
                 "price": str(unit_price),
                 "amount": str(total),
-                "hs_product_id": None,  # No product catalog
             }
         }
         
@@ -709,13 +708,17 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
                 line_item_id = r.json()['id']
                 
                 # Associate line item with deal
-                assoc_url = f"https://api.hubapi.com/crm/v3/objects/line_items/{line_item_id}/associations/deals/{deal_id}/line_item_to_deal"
-                requests.put(assoc_url, headers=headers, timeout=30)
-                created += 1
+                assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/line_items/{line_item_id}/deal_to_line_item"
+                assoc_r = requests.put(assoc_url, headers=headers, timeout=30)
+                if assoc_r.status_code in [200, 201, 204]:
+                    created += 1
+                else:
+                    errors.append(f"Line item created but association failed: {assoc_r.status_code}")
+                    created += 1  # Still count as created
             else:
-                errors.append(f"Failed to create line item '{name}': {r.status_code}")
+                errors.append(f"Failed '{name[:30]}': {r.status_code} - {r.text[:100]}")
         except Exception as e:
-            errors.append(f"Error creating line item '{name}': {str(e)}")
+            errors.append(f"Error '{name[:30]}': {str(e)}")
     
     return created, errors
 
@@ -804,31 +807,15 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         existing_line_items = get_deal_line_items(api_key, deal_id)
         
         if not existing_line_items:
-            # No line items - fetch from Cin7 and add them
-            result["details"].append(f"DEBUG: No line items found, fetching from Cin7...")
-            if cin7_username and cin7_api_key:
-                order_id = order.get('id')
-                result["details"].append(f"DEBUG: Order ID = {order_id}")
-                if order_id:
-                    detailed_order = fetch_order_details(cin7_username, cin7_api_key, order_id)
-                    if detailed_order:
-                        result["details"].append(f"DEBUG: Got detailed order, keys = {list(detailed_order.keys())[:10]}")
-                        line_items_created, line_errors = create_line_items(api_key, deal_id, detailed_order)
-                        if line_items_created > 0:
-                            result["details"].append(f"{line_items_created} line items added")
-                            # If we added line items, mark as updated (not skipped)
-                            if result["action"] == "skipped":
-                                result["action"] = "updated"
-                        else:
-                            result["details"].append("DEBUG: No line items created")
-                        if line_errors:
-                            result["details"].append(f"Line item errors: {line_errors[:3]}")  # Show first 3 errors
-                    else:
-                        result["details"].append("DEBUG: Failed to fetch detailed order")
-                else:
-                    result["details"].append("DEBUG: No order ID found")
-            else:
-                result["details"].append("DEBUG: Missing Cin7 credentials")
+            # No line items - create them from order data (already has lineItems from list API)
+            line_items_created, line_errors = create_line_items(api_key, deal_id, order)
+            if line_items_created > 0:
+                result["details"].append(f"{line_items_created} line items added")
+                # If we added line items, mark as updated (not skipped)
+                if result["action"] == "skipped":
+                    result["action"] = "updated"
+            if line_errors:
+                result["details"].append(f"Line item errors: {line_errors[:3]}")
         else:
             result["details"].append(f"{len(existing_line_items)} line items already exist")
         
@@ -922,19 +909,9 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
             result["details"].append(f"Deal created as {stage_or_error}")
             
             # -------------------------------------------------------------------------
-            # STEP 2d: Create line items (fetch from Cin7 if credentials provided)
+            # STEP 2d: Create line items (already in order data from list API)
             # -------------------------------------------------------------------------
-            order_with_lines = order
-            
-            # Fetch detailed order from Cin7 to get line items
-            if cin7_username and cin7_api_key:
-                order_id = order.get('id')
-                if order_id:
-                    detailed_order = fetch_order_details(cin7_username, cin7_api_key, order_id)
-                    if detailed_order:
-                        order_with_lines = detailed_order
-            
-            line_items_created, line_errors = create_line_items(api_key, deal_id, order_with_lines)
+            line_items_created, line_errors = create_line_items(api_key, deal_id, order)
             if line_items_created > 0:
                 result["details"].append(f"{line_items_created} line items added")
             if line_errors:
