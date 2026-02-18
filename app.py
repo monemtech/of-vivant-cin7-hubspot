@@ -198,7 +198,7 @@ def test_cin7(username: str, api_key: str) -> tuple:
             "https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
             params={"rows": 1},
-            timeout=30
+            timeout=15
         )
         if r.status_code == 200:
             return True, "Connected"
@@ -290,7 +290,7 @@ def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
         r = requests.get(
             f"https://api.cin7.com/api/v1/SalesOrders/{order_id}",
             auth=(username, api_key),
-            timeout=30
+            timeout=15
         )
         if r.status_code == 200:
             data = r.json()
@@ -307,7 +307,7 @@ def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
             f"https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
             params={"where": f"id={order_id}"},
-            timeout=30
+            timeout=15
         )
         if r.status_code == 200:
             data = r.json()
@@ -322,7 +322,7 @@ def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
             f"https://api.cin7.com/api/v1/SalesOrders",
             auth=(username, api_key),
             params={"where": f"id='{order_id}'"},
-            timeout=30
+            timeout=15
         )
         if r.status_code == 200:
             data = r.json()
@@ -416,7 +416,7 @@ def search_deal_by_order_ref(api_key: str, order_ref: str) -> dict:
     }
     
     try:
-        r = requests.post(search_url, headers=headers, json=search_body, timeout=30)
+        r = requests.post(search_url, headers=headers, json=search_body, timeout=15)
         if r.status_code == 200:
             results = r.json().get('results', [])
             # Find exact match (order ref should be in deal name)
@@ -446,7 +446,7 @@ def search_contact_by_email(api_key: str, email: str) -> dict:
     }
     
     try:
-        r = requests.post(search_url, headers=headers, json=search_body, timeout=30)
+        r = requests.post(search_url, headers=headers, json=search_body, timeout=15)
         if r.status_code == 200:
             results = r.json().get('results', [])
             if results:
@@ -474,7 +474,7 @@ def search_company_by_name(api_key: str, company_name: str) -> dict:
     }
     
     try:
-        r = requests.post(search_url, headers=headers, json=search_body, timeout=30)
+        r = requests.post(search_url, headers=headers, json=search_body, timeout=15)
         if r.status_code == 200:
             results = r.json().get('results', [])
             if results:
@@ -492,7 +492,7 @@ def update_deal(api_key: str, deal_id: str, properties: dict) -> bool:
     url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
     
     try:
-        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=30)
+        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=15)
         return r.status_code == 200
     except:
         return False
@@ -503,7 +503,7 @@ def update_contact(api_key: str, contact_id: str, properties: dict) -> bool:
     url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
     
     try:
-        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=30)
+        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=15)
         return r.status_code == 200
     except:
         return False
@@ -514,7 +514,7 @@ def update_company(api_key: str, company_id: str, properties: dict) -> bool:
     url = f"https://api.hubapi.com/crm/v3/objects/companies/{company_id}"
     
     try:
-        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=30)
+        r = requests.patch(url, headers=headers, json={"properties": properties}, timeout=15)
         return r.status_code == 200
     except:
         return False
@@ -539,7 +539,7 @@ def create_contact(api_key: str, email: str, first_name: str, last_name: str,
         properties["phone"] = phone
     
     try:
-        r = requests.post(url, headers=headers, json={"properties": properties}, timeout=30)
+        r = requests.post(url, headers=headers, json={"properties": properties}, timeout=15)
         if r.status_code == 201:
             return r.json()['id']
     except:
@@ -570,7 +570,7 @@ def create_company(api_key: str, name: str, phone: str = "", address: str = "",
         properties["country"] = country
     
     try:
-        r = requests.post(url, headers=headers, json={"properties": properties}, timeout=30)
+        r = requests.post(url, headers=headers, json={"properties": properties}, timeout=15)
         if r.status_code == 201:
             return r.json()['id']
     except:
@@ -606,19 +606,19 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
     
     try:
         r = requests.post("https://api.hubapi.com/crm/v3/objects/deals", 
-                         headers=headers, json=deal_data, timeout=30)
+                         headers=headers, json=deal_data, timeout=15)
         if r.status_code == 201:
             deal_id = r.json()['id']
             
             # Associate with contact
             if contact_id:
                 assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/contacts/{contact_id}/deal_to_contact"
-                requests.put(assoc_url, headers=headers, timeout=30)
+                requests.put(assoc_url, headers=headers, timeout=15)
             
             # Associate with company
             if company_id:
                 assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/companies/{company_id}/deal_to_company"
-                requests.put(assoc_url, headers=headers, timeout=30)
+                requests.put(assoc_url, headers=headers, timeout=15)
             
             return deal_id, stage_label
         else:
@@ -636,7 +636,7 @@ def get_deal_line_items(api_key: str, deal_id: str) -> list:
     try:
         # Get line items associated with this deal
         url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/line_items"
-        r = requests.get(url, headers=headers, timeout=30)
+        r = requests.get(url, headers=headers, timeout=15)
         
         if r.status_code == 200:
             results = r.json().get('results', [])
@@ -648,7 +648,7 @@ def get_deal_line_items(api_key: str, deal_id: str) -> list:
 
 def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
     """
-    Create line items for a deal from Cin7 order data.
+    Create line items for a deal from Cin7 order data using batch API.
     Returns (count_created, errors_list)
     """
     headers = get_headers(api_key)
@@ -661,19 +661,19 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
             break
     
     if not line_items:
-        return 0, [f"No line items found. Available keys: {list(order.keys())[:15]}"]
+        return 0, [f"No line items found"]
     
-    created = 0
     errors = []
     
+    # Build batch of line items
+    batch_inputs = []
     for item in line_items:
         # Extract line item details from Cin7
         product_name = item.get('name') or item.get('productName') or item.get('description') or 'Product'
         sku = item.get('code') or item.get('sku') or item.get('productCode') or ''
         quantity = item.get('qty') or item.get('quantity') or 1
         unit_price = item.get('unitPrice') or item.get('price') or 0
-        discount = item.get('discount') or 0
-        total = item.get('total') or item.get('lineTotal') or (float(quantity) * float(unit_price))
+        total = float(quantity) * float(unit_price)
         
         # Build line item name with SKU if available
         if sku:
@@ -681,58 +681,56 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
         else:
             name = product_name
         
-        # Create line item in HubSpot
-        line_item_data = {
+        batch_inputs.append({
             "properties": {
-                "name": name[:250],  # HubSpot limit
+                "name": name[:250],
                 "quantity": str(quantity),
                 "price": str(unit_price),
                 "amount": str(total),
-            }
-        }
-        
-        # Add discount if present
-        if discount and float(discount) > 0:
-            line_item_data["properties"]["discount"] = str(discount)
-        
+            },
+            "associations": [
+                {
+                    "to": {"id": deal_id},
+                    "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 20}]
+                }
+            ]
+        })
+    
+    # Create all line items in one batch call (max 100 per batch)
+    created = 0
+    for i in range(0, len(batch_inputs), 100):
+        batch = batch_inputs[i:i+100]
         try:
-            # Create the line item
             r = requests.post(
-                "https://api.hubapi.com/crm/v3/objects/line_items",
+                "https://api.hubapi.com/crm/v3/objects/line_items/batch/create",
                 headers=headers,
-                json=line_item_data,
-                timeout=30
+                json={"inputs": batch},
+                timeout=60
             )
             
-            if r.status_code == 201:
-                line_item_id = r.json()['id']
-                
-                # Associate line item with deal
-                assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/line_items/{line_item_id}/deal_to_line_item"
-                assoc_r = requests.put(assoc_url, headers=headers, timeout=30)
-                if assoc_r.status_code in [200, 201, 204]:
-                    created += 1
-                else:
-                    errors.append(f"Line item created but association failed: {assoc_r.status_code}")
-                    created += 1  # Still count as created
+            if r.status_code in [200, 201]:
+                results = r.json().get('results', [])
+                created += len(results)
             else:
-                errors.append(f"Failed '{name[:30]}': {r.status_code} - {r.text[:100]}")
+                errors.append(f"Batch create failed: {r.status_code} - {r.text[:200]}")
         except Exception as e:
-            errors.append(f"Error '{name[:30]}': {str(e)}")
+            errors.append(f"Batch error: {str(e)}")
     
     return created, errors
 
 # -----------------------------------------------------------------------------
 # FULL SYNC FUNCTION
 # -----------------------------------------------------------------------------
-def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, cin7_api_key: str = None) -> dict:
+def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, cin7_api_key: str = None,
+                          contact_cache: dict = None, company_cache: dict = None, cache_lock = None) -> dict:
     """
     Full sync of a single order to HubSpot.
     - Creates or updates deal
     - Creates or updates contact
     - Creates or updates company
-    - Creates line items (fetches from Cin7 if credentials provided)
+    - Creates line items
     
+    Uses optional caches to avoid redundant contact/company lookups.
     Returns result dict with action taken and details.
     """
     result = {
@@ -831,72 +829,102 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         company_id = None
         
         # -------------------------------------------------------------------------
-        # STEP 2a: Sync contact (most orders are Closed Won, so process quickly)
+        # STEP 2a: Sync contact (with caching)
         # -------------------------------------------------------------------------
         if email:
-            existing_contact = search_contact_by_email(api_key, email)
+            # Check cache first
+            cached_contact_id = None
+            if contact_cache is not None and cache_lock:
+                with cache_lock:
+                    cached_contact_id = contact_cache.get(email.lower())
             
-            if existing_contact:
-                contact_id = existing_contact['id']
-                # Check if contact needs update
-                props = existing_contact.get('properties', {})
-                update_props = {}
-                
-                if first_name and props.get('firstname', '') != first_name:
-                    update_props['firstname'] = first_name
-                if last_name and props.get('lastname', '') != last_name:
-                    update_props['lastname'] = last_name
-                if phone and props.get('phone', '') != phone:
-                    update_props['phone'] = phone
-                if company_name and props.get('company', '') != company_name:
-                    update_props['company'] = company_name
-                
-                if update_props:
-                    update_contact(api_key, contact_id, update_props)
-                    result["details"].append("Contact updated")
-                else:
-                    result["details"].append("Contact unchanged")
+            if cached_contact_id:
+                contact_id = cached_contact_id
+                result["details"].append("Contact (cached)")
             else:
-                contact_id = create_contact(api_key, email, first_name, last_name, company_name, phone)
-                if contact_id:
-                    result["details"].append("Contact created")
+                existing_contact = search_contact_by_email(api_key, email)
+                
+                if existing_contact:
+                    contact_id = existing_contact['id']
+                    # Check if contact needs update
+                    props = existing_contact.get('properties', {})
+                    update_props = {}
+                    
+                    if first_name and props.get('firstname', '') != first_name:
+                        update_props['firstname'] = first_name
+                    if last_name and props.get('lastname', '') != last_name:
+                        update_props['lastname'] = last_name
+                    if phone and props.get('phone', '') != phone:
+                        update_props['phone'] = phone
+                    if company_name and props.get('company', '') != company_name:
+                        update_props['company'] = company_name
+                    
+                    if update_props:
+                        update_contact(api_key, contact_id, update_props)
+                        result["details"].append("Contact updated")
+                    else:
+                        result["details"].append("Contact unchanged")
                 else:
-                    result["details"].append("Contact creation failed")
+                    contact_id = create_contact(api_key, email, first_name, last_name, company_name, phone)
+                    if contact_id:
+                        result["details"].append("Contact created")
+                    else:
+                        result["details"].append("Contact creation failed")
+                
+                # Update cache
+                if contact_id and contact_cache is not None and cache_lock:
+                    with cache_lock:
+                        contact_cache[email.lower()] = contact_id
         
         # -------------------------------------------------------------------------
-        # STEP 2b: Sync company
+        # STEP 2b: Sync company (with caching)
         # -------------------------------------------------------------------------
         if company_name:
-            existing_company = search_company_by_name(api_key, company_name)
+            # Check cache first
+            cached_company_id = None
+            if company_cache is not None and cache_lock:
+                with cache_lock:
+                    cached_company_id = company_cache.get(company_name.lower())
             
-            if existing_company:
-                company_id = existing_company['id']
-                # Check if company needs update
-                props = existing_company.get('properties', {})
-                update_props = {}
-                
-                if phone and props.get('phone', '') != phone:
-                    update_props['phone'] = phone
-                if address and props.get('address', '') != address:
-                    update_props['address'] = address
-                if city and props.get('city', '') != city:
-                    update_props['city'] = city
-                if state and props.get('state', '') != state:
-                    update_props['state'] = state
-                if zip_code and props.get('zip', '') != zip_code:
-                    update_props['zip'] = zip_code
-                
-                if update_props:
-                    update_company(api_key, company_id, update_props)
-                    result["details"].append("Company updated")
-                else:
-                    result["details"].append("Company unchanged")
+            if cached_company_id:
+                company_id = cached_company_id
+                result["details"].append("Company (cached)")
             else:
-                company_id = create_company(api_key, company_name, phone, address, city, state, zip_code, country)
-                if company_id:
-                    result["details"].append("Company created")
+                existing_company = search_company_by_name(api_key, company_name)
+                
+                if existing_company:
+                    company_id = existing_company['id']
+                    # Check if company needs update
+                    props = existing_company.get('properties', {})
+                    update_props = {}
+                    
+                    if phone and props.get('phone', '') != phone:
+                        update_props['phone'] = phone
+                    if address and props.get('address', '') != address:
+                        update_props['address'] = address
+                    if city and props.get('city', '') != city:
+                        update_props['city'] = city
+                    if state and props.get('state', '') != state:
+                        update_props['state'] = state
+                    if zip_code and props.get('zip', '') != zip_code:
+                        update_props['zip'] = zip_code
+                    
+                    if update_props:
+                        update_company(api_key, company_id, update_props)
+                        result["details"].append("Company updated")
+                    else:
+                        result["details"].append("Company unchanged")
                 else:
-                    result["details"].append("Company creation failed")
+                    company_id = create_company(api_key, company_name, phone, address, city, state, zip_code, country)
+                    if company_id:
+                        result["details"].append("Company created")
+                    else:
+                        result["details"].append("Company creation failed")
+                
+                # Update cache
+                if company_id and company_cache is not None and cache_lock:
+                    with cache_lock:
+                        company_cache[company_name.lower()] = company_id
         
         # -------------------------------------------------------------------------
         # STEP 2c: Create deal
@@ -925,10 +953,12 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
 def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None, 
                            cin7_username: str = None, cin7_api_key: str = None) -> dict:
     """
-    Full sync of multiple orders to HubSpot.
-    If Cin7 credentials provided, will fetch order details for line items.
+    Full sync of multiple orders to HubSpot using parallel processing.
     Returns detailed results dict.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    
     results = {
         "created": [],
         "updated": [],
@@ -938,29 +968,54 @@ def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None,
         "pending_payment": 0
     }
     
-    for i, order in enumerate(orders):
-        sync_result = sync_order_to_hubspot(api_key, order, cin7_username, cin7_api_key)
-        order_ref = sync_result["order_ref"]
+    # Thread-safe caches to avoid redundant API calls
+    contact_cache = {}  # email -> contact_id
+    company_cache = {}  # company_name -> company_id
+    cache_lock = threading.Lock()
+    
+    # Thread-safe counter
+    progress_lock = threading.Lock()
+    completed_count = [0]  # Using list for mutability in closure
+    
+    def process_order(order):
+        """Process a single order and return result."""
+        return sync_order_to_hubspot(api_key, order, cin7_username, cin7_api_key, 
+                                     contact_cache, company_cache, cache_lock)
+    
+    # Use ThreadPoolExecutor for parallel processing
+    # Limit to 5 concurrent requests to avoid HubSpot rate limits
+    max_workers = 5
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all orders
+        future_to_order = {executor.submit(process_order, order): order for order in orders}
         
-        # Categorize result
-        if sync_result["success"]:
-            if sync_result["action"] == "created":
-                results["created"].append(sync_result)
-            elif sync_result["action"] == "updated":
-                results["updated"].append(sync_result)
-            else:  # skipped
-                results["skipped"].append(sync_result)
+        # Process results as they complete
+        for future in as_completed(future_to_order):
+            sync_result = future.result()
             
-            # Count by stage
-            if sync_result["deal_stage"] == "Closed Won":
-                results["closed_won"] += 1
+            # Update progress
+            with progress_lock:
+                completed_count[0] += 1
+                if progress_callback:
+                    progress_callback(completed_count[0] / len(orders))
+            
+            # Categorize result
+            if sync_result["success"]:
+                if sync_result["action"] == "created":
+                    results["created"].append(sync_result)
+                elif sync_result["action"] == "updated":
+                    results["updated"].append(sync_result)
+                else:  # skipped
+                    results["skipped"].append(sync_result)
+                
+                # Count by stage
+                if sync_result["deal_stage"] == "Closed Won":
+                    results["closed_won"] += 1
+                else:
+                    results["pending_payment"] += 1
             else:
-                results["pending_payment"] += 1
-        else:
-            results["failed"].append(sync_result)
-        
-        if progress_callback:
-            progress_callback((i + 1) / len(orders))
+                results["failed"].append(sync_result)
     
     return results
 
@@ -970,7 +1025,7 @@ def test_hubspot(api_key: str) -> tuple:
             "https://api.hubapi.com/crm/v3/objects/contacts",
             headers={"Authorization": f"Bearer {api_key}"},
             params={"limit": 1},
-            timeout=30
+            timeout=15
         )
         if r.status_code == 200:
             return True, "Connected"
@@ -987,7 +1042,7 @@ def fetch_pipeline_stages(api_key: str) -> list:
         r = requests.get(
             "https://api.hubapi.com/crm/v3/pipelines/deals",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30
+            timeout=15
         )
         if r.status_code == 200:
             return r.json().get('results', [])
@@ -1502,7 +1557,7 @@ def main():
                     for approach_name, url, params in approaches:
                         st.write(f"**Trying:** {approach_name}")
                         try:
-                            r = requests.get(url, auth=(cin7_user, cin7_key), params=params if params else None, timeout=30)
+                            r = requests.get(url, auth=(cin7_user, cin7_key), params=params if params else None, timeout=15)
                             st.write(f"  Status: {r.status_code}")
                             
                             if r.status_code == 200:
