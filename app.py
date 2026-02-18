@@ -283,6 +283,40 @@ def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
     Fetch detailed order info from Cin7 including line items.
     The list API doesn't return line items, so we need to fetch individual orders.
     """
+    # Try multiple approaches since Cin7 API can be inconsistent
+    
+    # Approach 1: Direct ID endpoint
+    try:
+        r = requests.get(
+            f"https://api.cin7.com/api/v1/SalesOrders/{order_id}",
+            auth=(username, api_key),
+            timeout=30
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            elif isinstance(data, dict) and data:
+                return data
+    except:
+        pass
+    
+    # Approach 2: Query with id filter
+    try:
+        r = requests.get(
+            f"https://api.cin7.com/api/v1/SalesOrders",
+            auth=(username, api_key),
+            params={"where": f"id={order_id}"},
+            timeout=30
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+    except:
+        pass
+    
+    # Approach 3: Query with id in quotes
     try:
         r = requests.get(
             f"https://api.cin7.com/api/v1/SalesOrders",
@@ -292,13 +326,11 @@ def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
         )
         if r.status_code == 200:
             data = r.json()
-            # API returns a list, get first item
             if isinstance(data, list) and len(data) > 0:
                 return data[0]
-            elif isinstance(data, dict):
-                return data
     except:
         pass
+    
     return None
 
 # =============================================================================
@@ -1462,43 +1494,73 @@ def main():
                 order_id = selected_order.get('id')
                 order_ref = selected_order.get('reference')
                 
+                st.write(f"**Order Reference:** {order_ref}")
+                st.write(f"**Order ID:** {order_id}")
+                
+                # Show what fields we already have from the list API
+                st.subheader("Fields from List API (already loaded):")
+                st.code(list(selected_order.keys()))
+                
+                # Check if line items are already in the list response
+                for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
+                    if field_name in selected_order and selected_order[field_name]:
+                        st.success(f"✅ Line items already present in list API under '{field_name}'!")
+                        st.json(selected_order[field_name][:3])  # Show first 3
+                        break
+                else:
+                    st.info("No line items in list API response - need to fetch details")
+                
                 if order_id:
-                    with st.spinner(f"Fetching details for {order_ref}..."):
-                        detailed_order = fetch_order_details(cin7_user, cin7_key, order_id)
+                    st.divider()
+                    st.subheader("Fetching Detailed Order...")
                     
-                    if detailed_order:
-                        st.success(f"✅ Successfully fetched order details")
-                        
-                        # Show all available keys
-                        st.subheader("Available Fields in Order:")
-                        st.code(list(detailed_order.keys()))
-                        
-                        # Check for line items under various field names
-                        line_items_field = None
-                        for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
-                            if field_name in detailed_order and detailed_order[field_name]:
-                                line_items_field = field_name
-                                break
-                        
-                        if line_items_field:
-                            line_items = detailed_order[line_items_field]
-                            st.subheader(f"✅ Found Line Items (field: '{line_items_field}')")
-                            st.write(f"**{len(line_items)} line items found**")
+                    # Try each approach and show results
+                    approaches = [
+                        ("Direct endpoint /SalesOrders/{id}", f"https://api.cin7.com/api/v1/SalesOrders/{order_id}", {}),
+                        ("Query: id={id}", "https://api.cin7.com/api/v1/SalesOrders", {"where": f"id={order_id}"}),
+                        ("Query: id='{id}'", "https://api.cin7.com/api/v1/SalesOrders", {"where": f"id='{order_id}'"}),
+                        ("Query: reference='{ref}'", "https://api.cin7.com/api/v1/SalesOrders", {"where": f"reference='{order_ref}'"}),
+                    ]
+                    
+                    for approach_name, url, params in approaches:
+                        st.write(f"**Trying:** {approach_name}")
+                        try:
+                            r = requests.get(url, auth=(cin7_user, cin7_key), params=params if params else None, timeout=30)
+                            st.write(f"  Status: {r.status_code}")
                             
-                            # Show line items as table
-                            for i, item in enumerate(line_items):
-                                st.write(f"**Item {i+1}:**")
-                                st.json(item)
-                        else:
-                            st.warning("⚠️ No line items found under common field names")
-                            st.write("Checking all fields for arrays that might be line items:")
-                            for key, value in detailed_order.items():
-                                if isinstance(value, list) and len(value) > 0:
-                                    st.write(f"- **{key}**: {len(value)} items")
-                                    if len(value) > 0 and isinstance(value[0], dict):
-                                        st.write(f"  First item keys: {list(value[0].keys())}")
-                    else:
-                        st.error(f"❌ Failed to fetch order details for ID: {order_id}")
+                            if r.status_code == 200:
+                                data = r.json()
+                                
+                                # Handle list or dict response
+                                if isinstance(data, list):
+                                    st.write(f"  Response: List with {len(data)} items")
+                                    if len(data) > 0:
+                                        order_data = data[0]
+                                        st.success(f"  ✅ Got order data!")
+                                        st.write(f"  Keys: {list(order_data.keys())}")
+                                        
+                                        # Check for line items
+                                        for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
+                                            if field_name in order_data and order_data[field_name]:
+                                                st.success(f"  ✅ Found line items under '{field_name}': {len(order_data[field_name])} items")
+                                                st.json(order_data[field_name][:2])  # Show first 2
+                                                break
+                                        else:
+                                            st.warning("  ⚠️ No line items found in response")
+                                            # Show any list fields
+                                            for k, v in order_data.items():
+                                                if isinstance(v, list) and len(v) > 0:
+                                                    st.write(f"  List field '{k}': {len(v)} items")
+                                        break  # Found data, stop trying
+                                elif isinstance(data, dict) and data:
+                                    st.write(f"  Response: Dict")
+                                    st.write(f"  Keys: {list(data.keys())}")
+                                else:
+                                    st.write(f"  Response: Empty")
+                            else:
+                                st.write(f"  Error: {r.text[:200]}")
+                        except Exception as e:
+                            st.write(f"  Exception: {str(e)}")
                 else:
                     st.error("❌ No order ID found in order data")
         else:
