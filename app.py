@@ -2226,7 +2226,7 @@ def main():
             st.info("No orders loaded")
     
     # -------------------------------------------------------------------------
-    # FILTER LOGIC REFERENCE
+    # FILTER LOGIC REFERENCE - with edits
     # -------------------------------------------------------------------------
     with st.expander("📖 Filter Logic Reference"):
         st.markdown("""
