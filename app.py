@@ -2167,11 +2167,11 @@ def main():
         else:
             st.info("No skipped orders")
     
-    # -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
     # STATUS & SOURCE BREAKDOWN
     # -------------------------------------------------------------------------
     with st.expander("📊 Source Breakdown"):
-        if orders:
+        if orders and len(orders) > 0:
             source_data = {}
             for o in orders:
                 src = o.get('source') or 'Unknown'
@@ -2181,23 +2181,23 @@ def main():
                     source_data[key] = {'Source': src, 'Segment': seg, 'Count': 0, 'Revenue': 0}
                 source_data[key]['Count'] += 1
                 source_data[key]['Revenue'] += o.get('total', 0) or 0
-            
-            df_source = pd.DataFrame(source_data.values())
-            if not df_source.empty:
-                df_source = df_source.sort_values('Count', ascending=False)
-                st.dataframe(
-                    df_source, 
-                    use_container_width=True, 
-                    hide_index=True,
-                    column_config={
-                        'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
-                    }
-                )
+            if source_data:
+                df_source = pd.DataFrame(source_data.values())
+                if not df_source.empty:
+                    df_source = df_source.sort_values('Count', ascending=False)
+                    st.dataframe(
+                        df_source, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
+                        }
+                    )
         else:
             st.info("No orders loaded")
     
     with st.expander("📋 Status Breakdown"):
-        if orders:
+        if orders and len(orders) > 0:
             status_data = {}
             for o in orders:
                 status = o.get('stage') or o.get('status') or 'Unknown'
@@ -2207,24 +2207,23 @@ def main():
                     status_data[key] = {'Status': status, 'Segment': seg, 'Count': 0, 'Revenue': 0}
                 status_data[key]['Count'] += 1
                 status_data[key]['Revenue'] += o.get('total', 0) or 0
-            
-            df_status = pd.DataFrame(status_data.values())
-            if not df_status.empty:
-                df_status = df_status.sort_values('Count', ascending=False)
-                st.dataframe(
-                    df_status, 
-                    use_container_width=True, 
-                    hide_index=True,
-                    column_config={
-                        'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
-                    }
-                )
-                
-                st.caption("✅ **Importable statuses**: Approved, Dispatched, Voided")
-                st.caption("❌ **Skipped statuses**: Draft, Pending, New, and all others")
+            if status_data:
+                df_status = pd.DataFrame(status_data.values())
+                if not df_status.empty:
+                    df_status = df_status.sort_values('Count', ascending=False)
+                    st.dataframe(
+                        df_status, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
+                        }
+                    )
+                    st.caption("✅ **Importable statuses**: Approved, Dispatched, Voided")
+                    st.caption("❌ **Skipped statuses**: Draft, Pending, New, and all others")
         else:
             st.info("No orders loaded")
-    
+            
     # -------------------------------------------------------------------------
     # FILTER LOGIC REFERENCE - with edits
     # -------------------------------------------------------------------------
