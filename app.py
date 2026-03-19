@@ -4,6 +4,8 @@ OrderFloz — Cin7 to HubSpot Sync
 - Fetches wholesale orders from Cin7
 - Shows what would be synced to HubSpot
 - Push orders to HubSpot as Closed Won deals
+
+UPDATED: Now uses orderDate (actual sale date) instead of createdDate
 """
 
 import streamlit as st
@@ -825,6 +827,10 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
     payment_terms = order.get('paymentTerms') or 'Standard'
     total_owing = order.get('totalOwing', total)
     
+    # FIX: Use orderDate (actual sale date), fallback to createdDate
+    order_date = order.get('orderDate') or order.get('createdDate') or ''
+    order_date_display = order_date[:10] if order_date else 'Unknown'
+    
     # Build deal name
     deal_name = f"{company} - {order_ref}" if company else order_ref
     
@@ -834,7 +840,7 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
             "amount": str(total),
             "dealstage": stage_id,
             "pipeline": "default",
-            "description": f"Cin7 Order: {order_ref}\nPayment Terms: {payment_terms}\nOwing: ${total_owing}"
+            "description": f"Cin7 Order: {order_ref}\nOrder Date: {order_date_display}\nPayment Terms: {payment_terms}\nOwing: ${total_owing}"
         }
     }
     
@@ -1402,6 +1408,9 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         last = order.get('lastName') or order.get('billingLastName') or ''
         customer = f"{first} {last}".strip()
     
+    # FIX: Use orderDate (actual sale date), fallback to createdDate
+    order_date = order.get('orderDate') or order.get('createdDate') or ''
+    
     result = {
         'Order #': order.get('reference', ''),
         'Source': order.get('source', ''),
@@ -1411,7 +1420,7 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         'Company': order.get('company') or order.get('billingCompany') or '',
         'Customer': customer,
         'Email': order.get('email') or order.get('memberEmail') or '',
-        'Order Date': (order.get('createdDate') or '')[:10],
+        'Order Date': order_date[:10] if order_date else '',
         'Dispatched': (order.get('dispatchedDate') or '')[:10],
         'Payment': '✅ Paid' if is_paid(order) else '⏳ Unpaid',
         'Deal Stage': get_deal_stage(order)[1],  # "Closed Won" or "Pending Payment"
