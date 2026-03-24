@@ -6,6 +6,8 @@ OrderFloz - Cin7 to HubSpot Sync
 - Push orders to HubSpot as Closed Won deals
 
 UPDATED: Now uses orderDate (actual sale date) instead of createdDate
+UPDATED: Rep column in order table for owner troubleshooting
+UPDATED: Repairs missing company/contact associations on existing deals
 """
 
 import streamlit as st
@@ -285,8 +287,6 @@ def fetch_order_details(username: str, api_key: str, order_id: str) -> dict:
     Fetch detailed order info from Cin7 including line items.
     The list API doesn't return line items, so we need to fetch individual orders.
     """
-    # Try multiple approaches since Cin7 API can be inconsistent
-    
     # Approach 1: Direct ID endpoint
     try:
         r = requests.get(
@@ -346,33 +346,21 @@ HUBSPOT_STAGE_PENDING_PAYMENT = "decisionmakerboughtin"  # Update this to your a
 NET_PAYMENT_TERMS = ['net 30', 'net 60', 'net 90', 'net 15', 'net 30 days', 'net 60 days', 'net 45']
 
 def is_paid(order: dict) -> bool:
-    """Check if order is fully paid.
-    
-    Logic:
-    1. $0 orders → always PAID (nothing to collect)
-    2. "PAID: 100%" in paid field → PAID
-    3. Net payment terms + not marked paid → UNPAID
-    4. Default → PAID (most orders are paid at dispatch)
-    """
-    # 1. $0 orders are always paid (nothing to collect)
+    """Check if order is fully paid."""
     total = order.get('total', 0) or 0
     if float(total) == 0:
         return True
     
-    # 2. If paid field shows "100%" → definitely paid
     paid = str(order.get('paid') or '').strip()
     if '100%' in paid:
         return True
     
-    # 3. Check for Net payment terms (Net 30, Net 60, etc.)
     payment_terms = str(order.get('paymentTerms') or '').lower()
     has_net_terms = any(net in payment_terms for net in NET_PAYMENT_TERMS)
     
-    # If has Net terms and NOT marked as "PAID: 100%" → unpaid
     if has_net_terms:
         return False
     
-    # 4. Default: assume paid (most orders are paid at time of dispatch)
     return True
 
 def get_payment_debug(order: dict) -> str:
@@ -405,7 +393,6 @@ def search_deal_by_order_ref(api_key: str, order_ref: str) -> dict:
     headers = get_headers(api_key)
     search_url = "https://api.hubapi.com/crm/v3/objects/deals/search"
     
-    # Search in deal name (format: "Company - OrderRef" or just "OrderRef")
     search_body = {
         "filterGroups": [{
             "filters": [{
@@ -421,7 +408,6 @@ def search_deal_by_order_ref(api_key: str, order_ref: str) -> dict:
         r = requests.post(search_url, headers=headers, json=search_body, timeout=15)
         if r.status_code == 200:
             results = r.json().get('results', [])
-            # Find exact match (order ref should be in deal name)
             for deal in results:
                 if order_ref in deal.get('properties', {}).get('dealname', ''):
                     return deal
@@ -522,6 +508,40 @@ def update_company(api_key: str, company_id: str, properties: dict) -> bool:
         return False
 
 # -----------------------------------------------------------------------------
+# ASSOCIATION FUNCTIONS
+# -----------------------------------------------------------------------------
+def get_deal_associations(api_key: str, deal_id: str) -> dict:
+    """Fetch current company and contact associations for an existing deal."""
+    headers = get_headers(api_key)
+    result = {"companies": [], "contacts": []}
+    
+    for obj_type in ["companies", "contacts"]:
+        try:
+            r = requests.get(
+                f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/{obj_type}",
+                headers=headers,
+                timeout=15
+            )
+            if r.status_code == 200:
+                result[obj_type] = r.json().get("results", [])
+        except:
+            pass
+    
+    return result
+
+def associate_deal(api_key: str, deal_id: str, obj_type: str, obj_id: str) -> bool:
+    """Associate a deal with a company or contact.
+    obj_type = 'companies' or 'contacts'"""
+    headers = get_headers(api_key)
+    assoc_type = "deal_to_company" if obj_type == "companies" else "deal_to_contact"
+    url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/{obj_type}/{obj_id}/{assoc_type}"
+    try:
+        r = requests.put(url, headers=headers, timeout=15)
+        return r.status_code in [200, 201, 204]
+    except:
+        return False
+
+# -----------------------------------------------------------------------------
 # CREATE FUNCTIONS
 # -----------------------------------------------------------------------------
 def create_contact(api_key: str, email: str, first_name: str, last_name: str, 
@@ -549,9 +569,7 @@ def create_contact(api_key: str, email: str, first_name: str, last_name: str,
     return None
 
 def get_hubspot_owners(api_key: str) -> dict:
-    """
-    Fetch all HubSpot owners and return email → owner_id lookup dict.
-    """
+    """Fetch all HubSpot owners and return email → owner_id lookup dict."""
     headers = get_headers(api_key)
     owners = {}
     
@@ -583,7 +601,6 @@ def bulk_update_company_owners(api_key: str, company_to_rep: dict, owner_lookup:
     skipped = 0
     errors = 0
     
-    # Fetch all companies from HubSpot (paginated)
     all_companies = []
     after = None
     
@@ -602,8 +619,6 @@ def bulk_update_company_owners(api_key: str, company_to_rep: dict, owner_lookup:
             if r.status_code == 200:
                 data = r.json()
                 all_companies.extend(data.get('results', []))
-                
-                # Check for next page
                 paging = data.get('paging', {})
                 if paging.get('next', {}).get('after'):
                     after = paging['next']['after']
@@ -614,32 +629,25 @@ def bulk_update_company_owners(api_key: str, company_to_rep: dict, owner_lookup:
         except:
             break
     
-    # Update each company
     for company in all_companies:
         company_id = company.get('id')
         company_name = (company.get('properties', {}).get('name') or '').strip().upper()
         current_owner = company.get('properties', {}).get('hubspot_owner_id')
         
-        # Look up rep email by company name
         rep_email = company_to_rep.get(company_name)
-        
         if not rep_email:
             skipped += 1
             continue
         
-        # Look up HubSpot owner ID by rep email
         new_owner_id = owner_lookup.get(rep_email)
-        
         if not new_owner_id:
             skipped += 1
             continue
         
-        # Skip if owner already set correctly
         if current_owner == new_owner_id:
             skipped += 1
             continue
         
-        # Update the company owner
         try:
             r = requests.patch(
                 f"https://api.hubapi.com/crm/v3/objects/companies/{company_id}",
@@ -666,13 +674,12 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
     skipped = 0
     errors = 0
     
-    # Fetch all deals from HubSpot with company associations (paginated)
     all_deals = []
     after = None
     
     while True:
         params = {
-            "limit": 100, 
+            "limit": 100,
             "properties": "dealname,hubspot_owner_id",
             "associations": "companies"
         }
@@ -689,8 +696,6 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
             if r.status_code == 200:
                 data = r.json()
                 all_deals.extend(data.get('results', []))
-                
-                # Check for next page
                 paging = data.get('paging', {})
                 if paging.get('next', {}).get('after'):
                     after = paging['next']['after']
@@ -701,7 +706,6 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
         except:
             break
     
-    # Build company ID → name lookup
     company_id_to_name = {}
     after = None
     while True:
@@ -729,12 +733,10 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
         except:
             break
     
-    # Update each deal
     for deal in all_deals:
         deal_id = deal.get('id')
         current_owner = deal.get('properties', {}).get('hubspot_owner_id')
         
-        # Get associated company
         associations = deal.get('associations', {}).get('companies', {}).get('results', [])
         if not associations:
             skipped += 1
@@ -743,26 +745,20 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
         company_id = associations[0].get('id')
         company_name = company_id_to_name.get(company_id, '')
         
-        # Look up rep email by company name
         rep_email = company_to_rep.get(company_name)
-        
         if not rep_email:
             skipped += 1
             continue
         
-        # Look up HubSpot owner ID by rep email
         new_owner_id = owner_lookup.get(rep_email)
-        
         if not new_owner_id:
             skipped += 1
             continue
         
-        # Skip if owner already set correctly
         if current_owner == new_owner_id:
             skipped += 1
             continue
         
-        # Update the deal owner
         try:
             r = requests.patch(
                 f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}",
@@ -779,22 +775,18 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
     
     return updated, skipped, errors
 
-def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key: str, 
+def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key: str,
                                progress_callback=None) -> tuple:
     """
     Bulk sync HubSpot deal close dates from Cin7 order dates.
-    Extracts order reference from deal name, fetches order from Cin7, updates closedate.
     Returns (updated_count, skipped_count, error_count, details_list)
     """
-    import re
-    
     headers = get_headers(hs_api_key)
     updated = 0
     skipped = 0
     errors = 0
     details = []
     
-    # Fetch all deals from HubSpot (paginated)
     all_deals = []
     after = None
     
@@ -813,7 +805,6 @@ def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key:
             if r.status_code == 200:
                 data = r.json()
                 all_deals.extend(data.get('results', []))
-                
                 paging = data.get('paging', {})
                 if paging.get('next', {}).get('after'):
                     after = paging['next']['after']
@@ -826,7 +817,6 @@ def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key:
     
     total_deals = len(all_deals)
     
-    # Process each deal
     for i, deal in enumerate(all_deals):
         if progress_callback:
             progress_callback((i + 1) / total_deals)
@@ -835,12 +825,7 @@ def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key:
         deal_name = deal.get('properties', {}).get('dealname', '')
         current_closedate = deal.get('properties', {}).get('closedate', '')
         
-        # Extract order reference from deal name
-        # Format is usually "Company Name - SO-12345" or just "SO-12345"
-        # Look for common Cin7 order patterns: SO-xxxxx, INV-xxxxx, or just numeric refs
         order_ref = None
-        
-        # Try to extract order reference (last part after " - " or the whole name if no dash)
         if ' - ' in deal_name:
             potential_ref = deal_name.split(' - ')[-1].strip()
             order_ref = potential_ref
@@ -851,7 +836,6 @@ def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key:
             skipped += 1
             continue
         
-        # Fetch order from Cin7 by reference
         try:
             r = requests.get(
                 "https://api.cin7.com/api/v1/SalesOrders",
@@ -876,7 +860,6 @@ def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key:
                 skipped += 1
                 continue
             
-            # Compare dates
             cin7_date_str = cin7_order_date[:10] if cin7_order_date else ''
             current_date_str = current_closedate[:10] if current_closedate else ''
             
@@ -884,7 +867,6 @@ def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key:
                 skipped += 1
                 continue
             
-            # Update the deal closedate
             r = requests.patch(
                 f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}",
                 headers=headers,
@@ -941,10 +923,8 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
     """Create new deal. Returns (deal_id, stage_label) or (None, error_message)."""
     headers = get_headers(api_key)
     
-    # Get deal stage based on payment status
     stage_id, stage_label = get_deal_stage(order)
     
-    # Extract order details
     order_ref = order.get('reference', '')
     company = order.get('company') or order.get('billingCompany') or ''
     total = order.get('total', 0) or 0
@@ -955,7 +935,6 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
     order_date = order.get('orderDate') or order.get('createdDate') or ''
     order_date_display = order_date[:10] if order_date else 'Unknown'
     
-    # Build deal name
     deal_name = f"{company} - {order_ref}" if company else order_ref
     
     deal_data = {
@@ -969,25 +948,21 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
         }
     }
     
-    # Remove None values from properties
     deal_data["properties"] = {k: v for k, v in deal_data["properties"].items() if v is not None}
     
-    # Set deal owner if provided
     if owner_id:
         deal_data["properties"]["hubspot_owner_id"] = owner_id
     
     try:
-        r = requests.post("https://api.hubapi.com/crm/v3/objects/deals", 
+        r = requests.post("https://api.hubapi.com/crm/v3/objects/deals",
                          headers=headers, json=deal_data, timeout=15)
         if r.status_code == 201:
             deal_id = r.json()['id']
             
-            # Associate with contact
             if contact_id:
                 assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/contacts/{contact_id}/deal_to_contact"
                 requests.put(assoc_url, headers=headers, timeout=15)
             
-            # Associate with company
             if company_id:
                 assoc_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/companies/{company_id}/deal_to_company"
                 requests.put(assoc_url, headers=headers, timeout=15)
@@ -999,14 +974,10 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
         return None, str(e)
 
 def get_deal_line_items(api_key: str, deal_id: str) -> list:
-    """
-    Get existing line items for a deal.
-    Returns list of line items or empty list.
-    """
+    """Get existing line items for a deal."""
     headers = get_headers(api_key)
     
     try:
-        # Get line items associated with this deal
         url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}/associations/line_items"
         r = requests.get(url, headers=headers, timeout=15)
         
@@ -1025,7 +996,6 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
     """
     headers = get_headers(api_key)
     
-    # Check multiple possible field names for line items
     line_items = None
     for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
         if field_name in order and order[field_name]:
@@ -1036,18 +1006,15 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
         return 0, [f"No line items found"]
     
     errors = []
-    
-    # Build batch of line items
     batch_inputs = []
+    
     for item in line_items:
-        # Extract line item details from Cin7
         product_name = item.get('name') or item.get('productName') or item.get('description') or 'Product'
         sku = item.get('code') or item.get('sku') or item.get('productCode') or ''
         quantity = item.get('qty') or item.get('quantity') or 1
         unit_price = item.get('unitPrice') or item.get('price') or 0
         total = float(quantity) * float(unit_price)
         
-        # Build line item name with SKU if available
         if sku:
             name = f"{product_name} ({sku})"
         else:
@@ -1068,7 +1035,6 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
             ]
         })
     
-    # Create all line items in one batch call (max 100 per batch)
     created = 0
     for i in range(0, len(batch_inputs), 100):
         batch = batch_inputs[i:i+100]
@@ -1094,7 +1060,7 @@ def create_line_items(api_key: str, deal_id: str, order: dict) -> tuple:
 # FULL SYNC FUNCTION
 # -----------------------------------------------------------------------------
 def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, cin7_api_key: str = None,
-                          contact_cache: dict = None, company_cache: dict = None, cache_lock = None,
+                          contact_cache: dict = None, company_cache: dict = None, cache_lock=None,
                           owner_lookup: dict = None) -> dict:
     """
     Full sync of a single order to HubSpot.
@@ -1102,10 +1068,7 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
     - Creates or updates contact
     - Creates or updates company
     - Creates line items
-    
-    Uses optional caches to avoid redundant contact/company lookups.
-    Uses owner_lookup to map Cin7 Sales Rep to HubSpot Deal Owner.
-    Returns result dict with action taken and details.
+    - Repairs missing company/contact associations on existing deals
     """
     result = {
         "order_ref": order.get('reference', 'Unknown'),
@@ -1115,7 +1078,6 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         "details": []
     }
     
-    # Extract order info
     order_ref = order.get('reference', '')
     email = order.get('email') or order.get('memberEmail') or ''
     first_name = order.get('firstName') or order.get('billingFirstName') or ''
@@ -1124,14 +1086,12 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
     phone = order.get('phone') or order.get('billingPhone') or ''
     total = order.get('total', 0) or 0
     
-    # Address fields
     address = order.get('billingAddress1') or order.get('deliveryAddress1') or ''
     city = order.get('billingCity') or order.get('deliveryCity') or ''
     state = order.get('billingState') or order.get('deliveryState') or ''
     zip_code = order.get('billingPostCode') or order.get('deliveryPostCode') or ''
     country = order.get('billingCountry') or order.get('deliveryCountry') or ''
     
-    # Sales Rep → HubSpot Owner mapping
     sales_rep_email = (order.get('salesPersonEmail') or '').lower()
     owner_id = None
     if sales_rep_email and owner_lookup:
@@ -1139,12 +1099,11 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         if owner_id:
             result["details"].append(f"Rep: {sales_rep_email.split('@')[0]}")
     
-    # Get expected deal stage
     expected_stage_id, expected_stage_label = get_deal_stage(order)
     result["deal_stage"] = expected_stage_label
     
     # -------------------------------------------------------------------------
-    # STEP 1: Search for existing deal (FIRST - most common case is "already exists")
+    # STEP 1: Search for existing deal
     # -------------------------------------------------------------------------
     existing_deal = search_deal_by_order_ref(api_key, order_ref)
     
@@ -1154,28 +1113,22 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         current_amount = float(existing_deal.get('properties', {}).get('amount', 0) or 0)
         current_closedate = existing_deal.get('properties', {}).get('closedate', '')
         
-        # Get the Cin7 order date (the real close date)
         cin7_order_date = order.get('orderDate') or order.get('createdDate') or ''
         
-        # Check if deal needs update
         needs_update = False
         update_props = {}
         
-        # Check stage change (Pending Payment → Closed Won when paid)
         if current_stage != expected_stage_id:
             update_props["dealstage"] = expected_stage_id
             needs_update = True
             result["details"].append(f"Stage: {current_stage} → {expected_stage_id}")
         
-        # Check amount change
         if abs(current_amount - total) > 0.01:
             update_props["amount"] = str(total)
             needs_update = True
             result["details"].append(f"Amount: ${current_amount:.2f} → ${total:.2f}")
         
-        # Check closedate - sync Cin7 Order Date to HubSpot Close Date
         if cin7_order_date:
-            # Compare dates (just the date portion)
             cin7_date_str = cin7_order_date[:10] if cin7_order_date else ''
             current_date_str = current_closedate[:10] if current_closedate else ''
             if cin7_date_str != current_date_str:
@@ -1196,16 +1149,14 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
             result["details"].append("No changes needed")
         
         # -------------------------------------------------------------------------
-        # Check if existing deal is missing line items
+        # Check for missing line items
         # -------------------------------------------------------------------------
         existing_line_items = get_deal_line_items(api_key, deal_id)
         
         if not existing_line_items:
-            # No line items - create them from order data (already has lineItems from list API)
             line_items_created, line_errors = create_line_items(api_key, deal_id, order)
             if line_items_created > 0:
                 result["details"].append(f"{line_items_created} line items added")
-                # If we added line items, mark as updated (not skipped)
                 if result["action"] == "skipped":
                     result["action"] = "updated"
             if line_errors:
@@ -1213,13 +1164,57 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         else:
             result["details"].append(f"{len(existing_line_items)} line items already exist")
         
-        # Still sync contact and company even if deal unchanged
-        contact_id = None
-        company_id = None
-        
+        # -------------------------------------------------------------------------
+        # Repair missing company/contact associations
+        # -------------------------------------------------------------------------
+        existing_assocs = get_deal_associations(api_key, deal_id)
+        has_company = len(existing_assocs["companies"]) > 0
+        has_contact = len(existing_assocs["contacts"]) > 0
+
+        if not has_company and company_name:
+            existing_company = search_company_by_name(api_key, company_name)
+            if existing_company:
+                company_id = existing_company["id"]
+                result["details"].append("Company found")
+            else:
+                company_id = create_company(
+                    api_key, company_name, phone, address,
+                    city, state, zip_code, country, owner_id
+                )
+                if company_id:
+                    result["details"].append("Company created")
+                else:
+                    company_id = None
+            if company_id and associate_deal(api_key, deal_id, "companies", company_id):
+                result["details"].append("Company association repaired")
+                if result["action"] == "skipped":
+                    result["action"] = "updated"
+
+        if not has_contact and email:
+            existing_contact = search_contact_by_email(api_key, email)
+            if existing_contact:
+                contact_id = existing_contact["id"]
+                result["details"].append("Contact found")
+            else:
+                contact_id = create_contact(
+                    api_key, email, first_name, last_name, company_name, phone
+                )
+                if contact_id:
+                    result["details"].append("Contact created")
+                else:
+                    contact_id = None
+            if contact_id and associate_deal(api_key, deal_id, "contacts", contact_id):
+                result["details"].append("Contact association repaired")
+                if result["action"] == "skipped":
+                    result["action"] = "updated"
+
+        # Mark success if we haven't hit a hard failure
+        if result["action"] != "update_failed":
+            result["success"] = True
+
     else:
         # -------------------------------------------------------------------------
-        # STEP 2: Deal not found - need to create
+        # STEP 2: Deal not found — create
         # -------------------------------------------------------------------------
         contact_id = None
         company_id = None
@@ -1228,7 +1223,6 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         # STEP 2a: Sync contact (with caching)
         # -------------------------------------------------------------------------
         if email:
-            # Check cache first
             cached_contact_id = None
             if contact_cache is not None and cache_lock:
                 with cache_lock:
@@ -1242,7 +1236,6 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
                 
                 if existing_contact:
                     contact_id = existing_contact['id']
-                    # Check if contact needs update
                     props = existing_contact.get('properties', {})
                     update_props = {}
                     
@@ -1267,7 +1260,6 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
                     else:
                         result["details"].append("Contact creation failed")
                 
-                # Update cache
                 if contact_id and contact_cache is not None and cache_lock:
                     with cache_lock:
                         contact_cache[email.lower()] = contact_id
@@ -1276,7 +1268,6 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         # STEP 2b: Sync company (with caching)
         # -------------------------------------------------------------------------
         if company_name:
-            # Check cache first
             cached_company_id = None
             if company_cache is not None and cache_lock:
                 with cache_lock:
@@ -1290,7 +1281,6 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
                 
                 if existing_company:
                     company_id = existing_company['id']
-                    # Check if company needs update
                     props = existing_company.get('properties', {})
                     update_props = {}
                     
@@ -1311,20 +1301,18 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
                     else:
                         result["details"].append("Company unchanged")
                 else:
-                    # Set Company Owner only on first creation
                     company_id = create_company(api_key, company_name, phone, address, city, state, zip_code, country, owner_id)
                     if company_id:
                         result["details"].append("Company created")
                     else:
                         result["details"].append("Company creation failed")
                 
-                # Update cache
                 if company_id and company_cache is not None and cache_lock:
                     with cache_lock:
                         company_cache[company_name.lower()] = company_id
         
         # -------------------------------------------------------------------------
-        # STEP 2c: Create deal (with Sales Rep as Deal Owner)
+        # STEP 2c: Create deal
         # -------------------------------------------------------------------------
         deal_id, stage_or_error = create_deal(api_key, order, contact_id, company_id, owner_id)
         
@@ -1334,7 +1322,7 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
             result["details"].append(f"Deal created as {stage_or_error}")
             
             # -------------------------------------------------------------------------
-            # STEP 2d: Create line items (already in order data from list API)
+            # STEP 2d: Create line items
             # -------------------------------------------------------------------------
             line_items_created, line_errors = create_line_items(api_key, deal_id, order)
             if line_items_created > 0:
@@ -1347,7 +1335,7 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
     
     return result
 
-def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None, 
+def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None,
                            cin7_username: str = None, cin7_api_key: str = None) -> dict:
     """
     Full sync of multiple orders to HubSpot using parallel processing.
@@ -1365,51 +1353,40 @@ def push_orders_to_hubspot(api_key: str, orders: list, progress_callback=None,
         "pending_payment": 0
     }
     
-    # Fetch HubSpot owners for Sales Rep → Deal Owner mapping
     owner_lookup = get_hubspot_owners(api_key)
     
-    # Thread-safe caches to avoid redundant API calls
-    contact_cache = {}  # email -> contact_id
-    company_cache = {}  # company_name -> company_id
+    contact_cache = {}
+    company_cache = {}
     cache_lock = threading.Lock()
     
-    # Thread-safe counter
     progress_lock = threading.Lock()
-    completed_count = [0]  # Using list for mutability in closure
+    completed_count = [0]
     
     def process_order(order):
-        """Process a single order and return result."""
-        return sync_order_to_hubspot(api_key, order, cin7_username, cin7_api_key, 
+        return sync_order_to_hubspot(api_key, order, cin7_username, cin7_api_key,
                                      contact_cache, company_cache, cache_lock, owner_lookup)
     
-    # Use ThreadPoolExecutor for parallel processing
-    # Limit to 5 concurrent requests to avoid HubSpot rate limits
     max_workers = 5
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all orders
         future_to_order = {executor.submit(process_order, order): order for order in orders}
         
-        # Process results as they complete
         for future in as_completed(future_to_order):
             sync_result = future.result()
             
-            # Update progress
             with progress_lock:
                 completed_count[0] += 1
                 if progress_callback:
                     progress_callback(completed_count[0] / len(orders))
             
-            # Categorize result
             if sync_result["success"]:
                 if sync_result["action"] == "created":
                     results["created"].append(sync_result)
                 elif sync_result["action"] == "updated":
                     results["updated"].append(sync_result)
-                else:  # skipped
+                else:
                     results["skipped"].append(sync_result)
                 
-                # Count by stage
                 if sync_result["deal_stage"] == "Closed Won":
                     results["closed_won"] += 1
                 else:
@@ -1456,16 +1433,6 @@ def fetch_pipeline_stages(api_key: str) -> list:
 def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
     """
     Filter orders into: to_import, to_review, to_skip
-    
-    Filter Logic (in order):
-    1. Retail segment → Skip
-    2. Company or email contains "vivant" → Review (internal/test)
-    3. Shopify Retail source (if checkbox) → Skip
-    4. Status not Approved/Dispatched/Voided → Skip
-    5. No email + Dispatched → Review (likely employee)
-    6. $0 value + Has email → Import (client sample/promo)
-    7. $0 value + No email → Review (likely employee)
-    8. Has value + Has email → Import
     """
     to_import = []
     to_review = []
@@ -1479,49 +1446,40 @@ def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
         company = (o.get('company') or o.get('billingCompany') or '').lower()
         has_email = bool((o.get('email') or o.get('memberEmail') or '').strip())
         
-        # 1. Skip retail
         if segment == 'Retail':
             o['_skip_reason'] = 'Retail segment'
             to_skip.append(o)
             continue
         
-        # 2. Review internal/test orders (Vivant in company name or email)
         email_address = (o.get('email') or o.get('memberEmail') or '').lower()
         if 'vivant' in company or 'vivant' in email_address:
             o['_review_reason'] = 'Internal (Vivant in company or email)'
             to_review.append(o)
             continue
         
-        # 3. Skip excluded sources
         if exclude_shopify and 'shopify retail' in source:
             o['_skip_reason'] = 'Shopify Retail excluded'
             to_skip.append(o)
             continue
         
-        # 4. Check status - only import Approved, Dispatched, and Voided
         if status not in IMPORTABLE_STATUSES:
             o['_skip_reason'] = f'Status: {status}'
             to_skip.append(o)
             continue
         
-        # 5. No email + Dispatched = likely employee order, send to review
         if not has_email and status == 'dispatched':
             o['_review_reason'] = 'No email (likely employee)'
             to_review.append(o)
             continue
         
-        # 6 & 7. Handle $0 orders
         if total == 0:
             if has_email:
-                # $0 + email = client order (sample/promo), import it
                 to_import.append(o)
             else:
-                # $0 + no email = likely employee, review
                 o['_review_reason'] = '$0 + No email (likely employee)'
                 to_review.append(o)
             continue
         
-        # 8. Has value + has email = import
         to_import.append(o)
     
     return to_import, to_review, to_skip
@@ -1533,10 +1491,9 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
     """Convert order to display format with raw numbers for proper sorting."""
     total = order.get('total', 0) or 0
     
-    # Get customer name from multiple possible fields
     customer = (
-        order.get('customerName') or 
-        order.get('contactName') or 
+        order.get('customerName') or
+        order.get('contactName') or
         order.get('billingName') or
         order.get('deliveryName') or
         order.get('memberName') or
@@ -1544,7 +1501,6 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         ''
     )
     
-    # If still empty, try firstName + lastName
     if not customer:
         first = order.get('firstName') or order.get('billingFirstName') or ''
         last = order.get('lastName') or order.get('billingLastName') or ''
@@ -1552,19 +1508,24 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
     
     # FIX: Use orderDate (actual sale date), fallback to createdDate
     order_date = order.get('orderDate') or order.get('createdDate') or ''
-    
+
+    # Rep column: show username portion or warning if missing
+    sales_person_email = order.get('salesPersonEmail') or ''
+    rep_display = sales_person_email.split('@')[0] if sales_person_email else '⚠️ No Rep'
+
     result = {
         'Order #': order.get('reference', ''),
         'Source': order.get('source', ''),
         'Segment': order.get('_segment', ''),
         'Total_Numeric': float(total),  # Hidden column for sorting
-        'Total': float(total),  # Display column
+        'Total': float(total),          # Display column
         'Company': order.get('company') or order.get('billingCompany') or '',
         'Customer': customer,
         'Email': order.get('email') or order.get('memberEmail') or '',
         'Order Date': order_date[:10] if order_date else '',
         'Payment': '✅ Paid' if is_paid(order) else '⏳ Unpaid',
-        'Deal Stage': get_deal_stage(order)[1],  # "Closed Won" or "Pending Payment"
+        'Deal Stage': get_deal_stage(order)[1],
+        'Rep': rep_display,
         'Status': order.get('stage') or order.get('status') or '',
     }
     
@@ -1580,14 +1541,10 @@ def prepare_dataframe(orders: list, include_reason: bool = False) -> pd.DataFram
     
     df = pd.DataFrame([order_to_summary(o, include_reason) for o in orders])
     
-    # Ensure Total is numeric
     df['Total_Numeric'] = pd.to_numeric(df['Total_Numeric'], errors='coerce').fillna(0)
     df['Total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
     
-    # Sort by numeric value (descending)
     df = df.sort_values('Total_Numeric', ascending=False)
-    
-    # Drop the helper column
     df = df.drop(columns=['Total_Numeric'])
     
     return df
@@ -1605,10 +1562,8 @@ def get_column_config():
 # MAIN APP
 # =============================================================================
 def main():
-    # Get current branding (may have been updated by admin)
     branding = get_branding()
     
-    # Header with branding - centered logo
     if branding.get("logo_url"):
         col1, col2, col3 = st.columns([2, 1, 2])
         with col2:
@@ -1617,7 +1572,6 @@ def main():
             except:
                 pass
     
-    # Centered title
     st.markdown(f"<h1 style='text-align: center;'>{branding['company_name']}</h1>", unsafe_allow_html=True)
     
     st.subheader("Cin7 → HubSpot Order Sync")
@@ -1704,17 +1658,14 @@ def main():
                 st.divider()
                 st.subheader("🎨 Branding")
                 
-                # Load current branding
                 current_branding = get_branding()
                 
-                # Editable fields
                 new_company = st.text_input("Company Name", value=current_branding.get('company_name', ''))
                 new_logo = st.text_input("Logo URL", value=current_branding.get('logo_url', ''), help="URL to your logo image")
                 new_color = st.color_picker("Primary Color", value=current_branding.get('primary_color', '#1a5276'))
                 new_email = st.text_input("Support Email", value=current_branding.get('support_email', ''))
                 new_powered = st.checkbox("Show 'Powered by OrderFloz'", value=current_branding.get('powered_by', True))
                 
-                # Preview logo if URL provided
                 if new_logo:
                     st.caption("Logo preview:")
                     try:
@@ -1788,7 +1739,6 @@ def main():
             if not hs_key:
                 st.warning("Enter HubSpot API key first")
             else:
-                # File uploader for mapping spreadsheet
                 uploaded_file = st.file_uploader(
                     "Upload Company → Owner mapping spreadsheet (Excel)",
                     type=['xlsx', 'xls'],
@@ -1799,12 +1749,10 @@ def main():
                     try:
                         df = pd.read_excel(uploaded_file)
                         
-                        # Check required columns
                         required_cols = ['Company Name', 'Rep Email']
                         if not all(col in df.columns for col in required_cols):
                             st.error(f"Spreadsheet must have columns: {required_cols}")
                         else:
-                            # Build company → rep email mapping
                             company_to_rep = {}
                             for _, row in df.iterrows():
                                 company = str(row.get('Company Name', '')).strip().upper()
@@ -1814,13 +1762,11 @@ def main():
                             
                             st.success(f"✅ Loaded {len(company_to_rep)} company → rep mappings")
                             
-                            # Show preview
                             with st.expander("Preview mappings (first 10)"):
                                 preview_items = list(company_to_rep.items())[:10]
                                 for company, email in preview_items:
                                     st.caption(f"• {company} → {email}")
                             
-                            # Fetch HubSpot owners
                             owner_lookup = get_hubspot_owners(hs_key)
                             if owner_lookup:
                                 st.info(f"Found {len(owner_lookup)} HubSpot owners")
@@ -1909,6 +1855,141 @@ def main():
                                 st.caption(f"• {detail}")
                             if len(details) > 50:
                                 st.caption(f"...and {len(details) - 50} more")
+        
+        # -------------------------------------------------------------------------
+        # HUBSPOT CLEANUP TOOL
+        # -------------------------------------------------------------------------
+        with st.expander("🧹 HubSpot Cleanup (Delete Duplicates)"):
+            st.caption("Find and delete duplicate or junk deals for a specific company/contact")
+            
+            if not hs_key:
+                st.warning("Enter HubSpot API key first")
+            else:
+                cleanup_search = st.text_input(
+                    "Search company or contact name",
+                    placeholder="e.g., MONARCH SKIN",
+                    key="cleanup_search"
+                )
+                
+                if st.button("🔍 Find Deals", key="cleanup_find") and cleanup_search:
+                    headers = get_headers(hs_key)
+                    
+                    search_body = {
+                        "filterGroups": [{
+                            "filters": [{
+                                "propertyName": "dealname",
+                                "operator": "CONTAINS_TOKEN",
+                                "value": cleanup_search
+                            }]
+                        }],
+                        "properties": ["dealname", "amount", "dealstage", "closedate", "createdate", "hubspot_owner_id"],
+                        "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}],
+                        "limit": 100
+                    }
+                    
+                    try:
+                        r = requests.post(
+                            "https://api.hubapi.com/crm/v3/objects/deals/search",
+                            headers=headers,
+                            json=search_body,
+                            timeout=30
+                        )
+                        
+                        if r.status_code == 200:
+                            deals = r.json().get('results', [])
+                            st.session_state.cleanup_deals = deals
+                            st.success(f"Found {len(deals)} deals matching '{cleanup_search}'")
+                        else:
+                            st.error(f"Search failed: {r.status_code}")
+                            st.session_state.cleanup_deals = []
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+                        st.session_state.cleanup_deals = []
+                
+                if 'cleanup_deals' in st.session_state and st.session_state.cleanup_deals:
+                    deals = st.session_state.cleanup_deals
+                    
+                    deal_data = []
+                    for d in deals:
+                        props = d.get('properties', {})
+                        deal_data.append({
+                            'Deal ID': d.get('id'),
+                            'Deal Name': props.get('dealname', ''),
+                            'Amount': f"${float(props.get('amount') or 0):,.2f}",
+                            'Close Date': (props.get('closedate') or '')[:10],
+                            'Created': (props.get('createdate') or '')[:10],
+                        })
+                    
+                    df = pd.DataFrame(deal_data)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    
+                    order_refs = {}
+                    for d in deals:
+                        name = d.get('properties', {}).get('dealname', '')
+                        if ' - ' in name:
+                            ref = name.split(' - ')[-1].strip()
+                        else:
+                            ref = name.strip()
+                        
+                        if ref not in order_refs:
+                            order_refs[ref] = []
+                        order_refs[ref].append(d)
+                    
+                    duplicates = {ref: deals_list for ref, deals_list in order_refs.items() if len(deals_list) > 1}
+                    
+                    if duplicates:
+                        st.warning(f"⚠️ Found {len(duplicates)} order(s) with duplicate deals:")
+                        for ref, dup_deals in duplicates.items():
+                            st.caption(f"• **{ref}**: {len(dup_deals)} deals")
+                    
+                    st.divider()
+                    
+                    delete_options = [f"{d.get('id')} - {d.get('properties', {}).get('dealname', '')} (Created: {(d.get('properties', {}).get('createdate') or '')[:10]})" for d in deals]
+                    
+                    selected_to_delete = st.multiselect(
+                        "Select deals to DELETE",
+                        options=delete_options,
+                        key="deals_to_delete"
+                    )
+                    
+                    if selected_to_delete:
+                        st.error(f"⚠️ You are about to DELETE {len(selected_to_delete)} deal(s). This cannot be undone!")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            confirm = st.checkbox("I understand this is permanent", key="confirm_delete")
+                        
+                        with col2:
+                            if confirm and st.button("🗑️ DELETE Selected Deals", type="primary", key="delete_deals"):
+                                headers = get_headers(hs_key)
+                                deleted = 0
+                                errors = 0
+                                
+                                progress = st.progress(0)
+                                for i, selection in enumerate(selected_to_delete):
+                                    deal_id = selection.split(' - ')[0]
+                                    try:
+                                        r = requests.delete(
+                                            f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}",
+                                            headers=headers,
+                                            timeout=15
+                                        )
+                                        if r.status_code == 204:
+                                            deleted += 1
+                                        else:
+                                            errors += 1
+                                    except:
+                                        errors += 1
+                                    
+                                    progress.progress((i + 1) / len(selected_to_delete))
+                                
+                                progress.empty()
+                                st.success(f"✅ Deleted {deleted} deal(s)")
+                                if errors:
+                                    st.warning(f"⚠️ {errors} deletion(s) failed")
+                                
+                                st.session_state.cleanup_deals = []
+                                st.rerun()
     
     # -------------------------------------------------------------------------
     # MAIN CONTENT
@@ -1924,19 +2005,15 @@ def main():
     since = datetime.combine(since_date, datetime.min.time())
     until = datetime.combine(until_date, datetime.max.time())
     
-    # Calculate date range for display
     date_range_days = (until_date - since_date).days + 1
     
-    # Fetch button
     if st.button("🔄 Fetch Orders (Read Only)", type="primary", use_container_width=True):
         if not cin7_user or not cin7_key:
             st.error("Enter Cin7 credentials in sidebar")
         else:
-            # Create a status container for professional loading display
             status_container = st.empty()
             progress_bar = st.progress(0)
             
-            # Track state for progress updates
             fetch_state = {"last_message": "", "orders": 0, "page": 1}
             
             def update_progress(phase, page, orders_so_far, message):
@@ -1944,9 +2021,7 @@ def main():
                 fetch_state["orders"] = orders_so_far
                 fetch_state["page"] = page
                 
-                # Update progress bar (estimate based on typical behavior)
                 if phase == "fetching":
-                    # Estimate progress - assume most fetches complete within 5 pages
                     progress = min(0.1 + (page * 0.15), 0.85)
                 elif phase == "processing":
                     progress = 0.90
@@ -1955,7 +2030,6 @@ def main():
                 
                 progress_bar.progress(progress)
                 
-                # Update status display
                 if phase == "fetching":
                     if orders_so_far > 0:
                         status_container.info(f"🔄 **Fetching orders...** Found {orders_so_far:,} orders so far (page {page})")
@@ -1969,18 +2043,15 @@ def main():
             try:
                 orders = fetch_orders(cin7_user, cin7_key, since, until, update_progress)
                 
-                # Clean up progress indicators
                 progress_bar.empty()
                 status_container.empty()
                 
                 st.session_state.fetched_orders = orders
                 st.session_state.fetch_since = since_date
                 st.session_state.fetch_until = until_date
-                # Reset selections
                 st.session_state.selected_import = set()
                 st.session_state.selected_review = set()
                 
-                # Show success with order breakdown
                 if orders:
                     wholesale_count = sum(1 for o in orders if classify_order(o) == 'Wholesale')
                     retail_count = len(orders) - wholesale_count
@@ -2003,23 +2074,18 @@ def main():
     
     st.caption(f"🟢 {len(orders)} orders loaded (dispatched between {st.session_state.fetch_since} and {st.session_state.fetch_until})")
     
-    # Filter orders
     to_import, to_review, to_skip = filter_orders(orders, exclude_shopify)
     
-    # Separate retail from other skipped
     retail_orders = [o for o in to_skip if o.get('_segment') == 'Retail']
     other_skipped = [o for o in to_skip if o.get('_segment') != 'Retail']
     
-    # Revenue calculations
     import_revenue = sum(o.get('total', 0) or 0 for o in to_import)
     review_revenue = sum(o.get('total', 0) or 0 for o in to_review)
     retail_revenue = sum(o.get('total', 0) or 0 for o in retail_orders)
     
-    # Reference sets for push button logic
     import_refs = {o.get('reference') for o in to_import}
     review_refs = {o.get('reference') for o in to_review}
     
-    # Pre-select all import orders on first load
     if not st.session_state.selected_import and to_import:
         st.session_state.selected_import = import_refs.copy()
     
@@ -2050,7 +2116,7 @@ def main():
     search_col1, search_col2 = st.columns([3, 1])
     with search_col1:
         search_term = st.text_input(
-            "Search orders", 
+            "Search orders",
             placeholder="Search by Order #, Company, Customer Name, or Email...",
             key="order_search"
         )
@@ -2068,15 +2134,13 @@ def main():
         
         term_lower = term.lower().strip()
         
-        # Build searchable values
         order_ref = (order.get('reference') or '').lower()
         company = (order.get('company') or order.get('billingCompany') or '').lower()
         email = (order.get('email') or order.get('memberEmail') or '').lower()
         
-        # Customer name from multiple fields
         customer = (
-            order.get('customerName') or 
-            order.get('contactName') or 
+            order.get('customerName') or
+            order.get('contactName') or
             order.get('billingName') or
             order.get('deliveryName') or
             order.get('memberName') or
@@ -2096,29 +2160,25 @@ def main():
             return term_lower in customer
         elif field == "Email":
             return term_lower in email
-        else:  # All Fields
-            return (term_lower in order_ref or 
-                    term_lower in company or 
-                    term_lower in customer or 
+        else:
+            return (term_lower in order_ref or
+                    term_lower in company or
+                    term_lower in customer or
                     term_lower in email)
     
-    # Apply search filter
     if search_term:
         to_import_filtered = [o for o in to_import if matches_search(o, search_term, search_field)]
         to_review_filtered = [o for o in to_review if matches_search(o, search_term, search_field)]
         
-        # Show filter status
         total_matches = len(to_import_filtered) + len(to_review_filtered)
         if total_matches > 0:
             st.success(f"🔎 Found **{total_matches}** matching orders ({len(to_import_filtered)} ready, {len(to_review_filtered)} review)")
         else:
             st.warning(f"No orders found matching '{search_term}'")
         
-        # Use filtered lists
         to_import = to_import_filtered
         to_review = to_review_filtered
         
-        # Update reference sets for filtered view
         import_refs = {o.get('reference') for o in to_import}
         review_refs = {o.get('reference') for o in to_review}
     
@@ -2130,7 +2190,6 @@ def main():
     with st.expander("🔍 Preview Line Items (Debug Tool)"):
         st.caption("Test fetching line items from Cin7 before syncing to HubSpot")
         
-        # Create dropdown of orders
         all_orders = to_import + to_review
         if all_orders:
             order_options = {f"{o.get('reference')} - {o.get('company', 'Unknown')} (${o.get('total', 0):,.2f})": o for o in all_orders}
@@ -2140,21 +2199,19 @@ def main():
                 selected_order = order_options[selected_order_name]
                 order_id = selected_order.get('id')
                 order_ref = selected_order.get('reference')
-                sales_rep = selected_order.get('salesPersonEmail', 'Not assigned')
+                sales_rep = selected_order.get('salesPersonEmail', '⚠️ Not assigned')
                 
                 st.write(f"**Order Reference:** {order_ref}")
                 st.write(f"**Order ID:** {order_id}")
                 st.write(f"**Sales Rep (→ Deal Owner):** {sales_rep}")
                 
-                # Show what fields we already have from the list API
                 st.subheader("Fields from List API (already loaded):")
                 st.code(list(selected_order.keys()))
                 
-                # Check if line items are already in the list response
                 for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
                     if field_name in selected_order and selected_order[field_name]:
                         st.success(f"✅ Line items already present in list API under '{field_name}'!")
-                        st.json(selected_order[field_name][:3])  # Show first 3
+                        st.json(selected_order[field_name][:3])
                         break
                 else:
                     st.info("No line items in list API response - need to fetch details")
@@ -2163,7 +2220,6 @@ def main():
                     st.divider()
                     st.subheader("Fetching Detailed Order...")
                     
-                    # Try each approach and show results
                     approaches = [
                         ("Direct endpoint /SalesOrders/{id}", f"https://api.cin7.com/api/v1/SalesOrders/{order_id}", {}),
                         ("Query: id={id}", "https://api.cin7.com/api/v1/SalesOrders", {"where": f"id={order_id}"}),
@@ -2180,7 +2236,6 @@ def main():
                             if r.status_code == 200:
                                 data = r.json()
                                 
-                                # Handle list or dict response
                                 if isinstance(data, list):
                                     st.write(f"  Response: List with {len(data)} items")
                                     if len(data) > 0:
@@ -2188,19 +2243,17 @@ def main():
                                         st.success(f"  ✅ Got order data!")
                                         st.write(f"  Keys: {list(order_data.keys())}")
                                         
-                                        # Check for line items
                                         for field_name in ['lineItems', 'lines', 'salesOrderLines', 'orderLines', 'items', 'lineDetails']:
                                             if field_name in order_data and order_data[field_name]:
                                                 st.success(f"  ✅ Found line items under '{field_name}': {len(order_data[field_name])} items")
-                                                st.json(order_data[field_name][:2])  # Show first 2
+                                                st.json(order_data[field_name][:2])
                                                 break
                                         else:
                                             st.warning("  ⚠️ No line items found in response")
-                                            # Show any list fields
                                             for k, v in order_data.items():
                                                 if isinstance(v, list) and len(v) > 0:
                                                     st.write(f"  List field '{k}': {len(v)} items")
-                                        break  # Found data, stop trying
+                                        break
                                 elif isinstance(data, dict) and data:
                                     st.write(f"  Response: Dict")
                                     st.write(f"  Keys: {list(data.keys())}")
@@ -2218,17 +2271,15 @@ def main():
     st.divider()
     
     # -------------------------------------------------------------------------
-    # SECTION 1: READY TO IMPORT (pre-selected)
+    # SECTION 1: READY TO IMPORT
     # -------------------------------------------------------------------------
     st.header(f"✅ Ready to Import ({len(to_import)} orders)")
     st.caption("These orders passed all filters and are pre-selected for import.")
     
     if to_import:
-        # Build dataframe with current selections
         df_import = prepare_dataframe(to_import)
         df_import.insert(0, 'Select', df_import['Order #'].apply(lambda x: x in st.session_state.selected_import))
         
-        # Editable table with checkboxes
         edited = st.data_editor(
             df_import,
             use_container_width=True,
@@ -2237,14 +2288,12 @@ def main():
                 'Select': st.column_config.CheckboxColumn('Select', default=True),
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
             },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Payment', 'Deal Stage', 'Status'],
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Payment', 'Deal Stage', 'Rep', 'Status'],
             key="import_editor"
         )
         
-        # Update session state from editor
         st.session_state.selected_import = set(edited[edited['Select']]['Order #'].tolist())
         
-        # Show count
         n = len(st.session_state.selected_import & import_refs)
         t = sum((o.get('total', 0) or 0) for o in to_import if o.get('reference') in st.session_state.selected_import)
         st.caption(f"✓ {n} of {len(to_import)} selected (${t:,.2f})")
@@ -2254,17 +2303,15 @@ def main():
     st.divider()
     
     # -------------------------------------------------------------------------
-    # SECTION 2: NEEDS REVIEW (not pre-selected, collapsed by default)
+    # SECTION 2: NEEDS REVIEW
     # -------------------------------------------------------------------------
     with st.expander(f"⚠️ Needs Review ({len(to_review)} orders) — Click to expand"):
         st.caption("These orders need manual review before import.")
         
         if to_review:
-            # Build dataframe
             df_review = prepare_dataframe(to_review, include_reason=True)
             df_review.insert(0, 'Select', df_review['Order #'].apply(lambda x: x in st.session_state.selected_review))
             
-            # Editable table with checkboxes
             edited_review = st.data_editor(
                 df_review,
                 use_container_width=True,
@@ -2274,14 +2321,12 @@ def main():
                     'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
-                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Payment', 'Deal Stage', 'Status', 'Reason'],
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Payment', 'Deal Stage', 'Rep', 'Status', 'Reason'],
                 key="review_editor"
             )
             
-            # Update session state from editor
             st.session_state.selected_review = set(edited_review[edited_review['Select']]['Order #'].tolist())
             
-            # Show count
             n = len(st.session_state.selected_review & review_refs)
             t = sum((o.get('total', 0) or 0) for o in to_review if o.get('reference') in st.session_state.selected_review)
             st.caption(f"✓ {n} of {len(to_review)} selected (${t:,.2f})")
@@ -2296,24 +2341,21 @@ def main():
     all_selected = (st.session_state.selected_import & import_refs) | (st.session_state.selected_review & review_refs)
     total_selected = len(all_selected)
     total_selected_revenue = sum(
-        (o.get('total', 0) or 0) 
-        for o in to_import + to_review 
+        (o.get('total', 0) or 0)
+        for o in to_import + to_review
         if o.get('reference') in all_selected
     )
     
     st.header("🚀 Sync to HubSpot")
     
     if total_selected > 0:
-        # Get selected orders
         selected_orders = [o for o in to_import + to_review if o.get('reference') in all_selected]
         
-        # Count by deal stage (using payment status, not terms)
         closed_won_count = sum(1 for o in selected_orders if is_paid(o))
         pending_count = total_selected - closed_won_count
         
         st.success(f"**{total_selected} orders selected** — Total: ${total_selected_revenue:,.2f}")
         
-        # Show breakdown by deal stage
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Closed Won", closed_won_count, help="Fully paid orders")
@@ -2323,9 +2365,8 @@ def main():
         if pending_count > 0:
             st.info(f"ℹ️ {pending_count} orders have outstanding balances and will sync as **Pending Payment** deals.")
         
-        st.caption("**Full Sync:** Creates new deals, updates existing deals, syncs contacts & companies.")
+        st.caption("**Full Sync:** Creates new deals, updates existing deals, syncs contacts & companies, repairs missing associations.")
         
-        # Confirmation checkbox
         confirm = st.checkbox(f"I confirm I want to sync {total_selected} orders to HubSpot", key="confirm_push")
         
         if st.button(
@@ -2337,7 +2378,6 @@ def main():
             if not hs_key:
                 st.error("Enter HubSpot API key in sidebar")
             else:
-                # Professional loading display
                 status_container = st.empty()
                 progress_bar = st.progress(0)
                 
@@ -2353,24 +2393,21 @@ def main():
                 
                 try:
                     results = push_orders_to_hubspot(
-                        hs_key, 
-                        selected_orders, 
+                        hs_key,
+                        selected_orders,
                         update_progress,
                         cin7_username=cin7_user,
                         cin7_api_key=cin7_key
                     )
                     
-                    # Clean up progress indicators
                     progress_bar.empty()
                     status_container.empty()
                     
-                    # Show results summary
                     created_count = len(results["created"])
                     updated_count = len(results["updated"])
                     skipped_count = len(results["skipped"])
                     failed_count = len(results["failed"])
                     
-                    # Success banner
                     if failed_count == 0:
                         st.success(f"✅ **Sync complete!** {created_count + updated_count + skipped_count} orders processed successfully.")
                     else:
@@ -2392,13 +2429,11 @@ def main():
                     | Pending Payment | {results['pending_payment']} |
                     """)
                     
-                    # Show details for updated orders (most interesting)
                     if results["updated"]:
                         with st.expander(f"🔄 Updated Deals ({updated_count})"):
                             for item in results["updated"]:
                                 st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
                     
-                    # Show details for skipped orders (shows line item status)
                     if results["skipped"]:
                         with st.expander(f"⏭️ Skipped Deals ({skipped_count}) - already synced"):
                             for item in results["skipped"][:20]:
@@ -2406,7 +2441,6 @@ def main():
                             if skipped_count > 20:
                                 st.caption(f"...and {skipped_count - 20} more")
                     
-                    # Show details for failed orders
                     if results["failed"]:
                         with st.expander(f"❌ Failed ({failed_count})", expanded=True):
                             for item in results["failed"][:10]:
@@ -2427,7 +2461,7 @@ def main():
     st.divider()
     
     # -------------------------------------------------------------------------
-    # SECTION 3: RETAIL (collapsed, view only)
+    # SECTION 3: RETAIL (view only)
     # -------------------------------------------------------------------------
     with st.expander(f"🛍️ Retail Orders ({len(retail_orders)}) — View Only"):
         st.caption("Retail orders are shown for reference only and cannot be imported")
@@ -2438,7 +2472,7 @@ def main():
             st.info("No retail orders")
     
     # -------------------------------------------------------------------------
-    # SECTION 4: SKIPPED (collapsed, view only)
+    # SECTION 4: SKIPPED (view only)
     # -------------------------------------------------------------------------
     with st.expander(f"⏭️ Skipped Orders ({len(other_skipped)}) — View Only"):
         st.caption("These orders were skipped due to filters (internal orders, wrong status, etc.)")
@@ -2467,8 +2501,8 @@ def main():
             if not df_source.empty:
                 df_source = df_source.sort_values('Count', ascending=False)
                 st.dataframe(
-                    df_source, 
-                    use_container_width=True, 
+                    df_source,
+                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
@@ -2493,8 +2527,8 @@ def main():
             if not df_status.empty:
                 df_status = df_status.sort_values('Count', ascending=False)
                 st.dataframe(
-                    df_status, 
-                    use_container_width=True, 
+                    df_status,
+                    use_container_width=True,
                     hide_index=True,
                     column_config={
                         'Revenue': st.column_config.NumberColumn('Revenue', format='$ %.2f')
@@ -2526,7 +2560,8 @@ def main():
         """)
     
     st.divider()
-    # Footer with branding (use branding variable from main())
+    
+    # Footer
     branding = get_branding()
     footer_text = f"**{branding['company_name']}** — Cin7 to HubSpot order sync"
     if branding.get("powered_by", True):
