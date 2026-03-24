@@ -1,5 +1,5 @@
 """
-OrderFloz — Cin7 to HubSpot Sync
+OrderFloz — Cin7 to HubSpot Sync (updated 20260324)
 ================================
 - Fetches wholesale orders from Cin7
 - Shows what would be synced to HubSpot
