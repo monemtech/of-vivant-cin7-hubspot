@@ -1,5 +1,5 @@
 """
-OrderFloz — Cin7 to HubSpot Sync
+OrderFloz — Cin7 to HubSpot Sync - 20260324
 ================================
 - Fetches wholesale orders from Cin7
 - Shows what would be synced to HubSpot
@@ -414,7 +414,7 @@ def search_deal_by_order_ref(api_key: str, order_ref: str) -> dict:
                 "value": order_ref
             }]
         }],
-        "properties": ["dealname", "amount", "dealstage", "pipeline"]
+        "properties": ["dealname", "amount", "dealstage", "pipeline", "closedate"]
     }
     
     try:
@@ -779,6 +779,130 @@ def bulk_update_deal_owners(api_key: str, company_to_rep: dict, owner_lookup: di
     
     return updated, skipped, errors
 
+def bulk_sync_deal_closedates(hs_api_key: str, cin7_username: str, cin7_api_key: str, 
+                               progress_callback=None) -> tuple:
+    """
+    Bulk sync HubSpot deal close dates from Cin7 order dates.
+    Extracts order reference from deal name, fetches order from Cin7, updates closedate.
+    Returns (updated_count, skipped_count, error_count, details_list)
+    """
+    import re
+    
+    headers = get_headers(hs_api_key)
+    updated = 0
+    skipped = 0
+    errors = 0
+    details = []
+    
+    # Fetch all deals from HubSpot (paginated)
+    all_deals = []
+    after = None
+    
+    while True:
+        params = {"limit": 100, "properties": "dealname,closedate"}
+        if after:
+            params["after"] = after
+        
+        try:
+            r = requests.get(
+                "https://api.hubapi.com/crm/v3/objects/deals",
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            if r.status_code == 200:
+                data = r.json()
+                all_deals.extend(data.get('results', []))
+                
+                paging = data.get('paging', {})
+                if paging.get('next', {}).get('after'):
+                    after = paging['next']['after']
+                else:
+                    break
+            else:
+                break
+        except:
+            break
+    
+    total_deals = len(all_deals)
+    
+    # Process each deal
+    for i, deal in enumerate(all_deals):
+        if progress_callback:
+            progress_callback((i + 1) / total_deals)
+        
+        deal_id = deal.get('id')
+        deal_name = deal.get('properties', {}).get('dealname', '')
+        current_closedate = deal.get('properties', {}).get('closedate', '')
+        
+        # Extract order reference from deal name
+        # Format is usually "Company Name - SO-12345" or just "SO-12345"
+        # Look for common Cin7 order patterns: SO-xxxxx, INV-xxxxx, or just numeric refs
+        order_ref = None
+        
+        # Try to extract order reference (last part after " - " or the whole name if no dash)
+        if ' - ' in deal_name:
+            potential_ref = deal_name.split(' - ')[-1].strip()
+            order_ref = potential_ref
+        else:
+            order_ref = deal_name.strip()
+        
+        if not order_ref:
+            skipped += 1
+            continue
+        
+        # Fetch order from Cin7 by reference
+        try:
+            r = requests.get(
+                "https://api.cin7.com/api/v1/SalesOrders",
+                auth=(cin7_username, cin7_api_key),
+                params={"where": f"reference='{order_ref}'"},
+                timeout=15
+            )
+            
+            if r.status_code != 200:
+                skipped += 1
+                continue
+            
+            orders = r.json()
+            if not orders or len(orders) == 0:
+                skipped += 1
+                continue
+            
+            order = orders[0]
+            cin7_order_date = order.get('orderDate') or order.get('createdDate') or ''
+            
+            if not cin7_order_date:
+                skipped += 1
+                continue
+            
+            # Compare dates
+            cin7_date_str = cin7_order_date[:10] if cin7_order_date else ''
+            current_date_str = current_closedate[:10] if current_closedate else ''
+            
+            if cin7_date_str == current_date_str:
+                skipped += 1
+                continue
+            
+            # Update the deal closedate
+            r = requests.patch(
+                f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}",
+                headers=headers,
+                json={"properties": {"closedate": cin7_order_date}},
+                timeout=15
+            )
+            
+            if r.status_code == 200:
+                updated += 1
+                details.append(f"{order_ref}: {current_date_str or 'empty'} → {cin7_date_str}")
+            else:
+                errors += 1
+                
+        except Exception as e:
+            errors += 1
+    
+    return updated, skipped, errors, details
+
 def create_company(api_key: str, name: str, phone: str = "", address: str = "",
                    city: str = "", state: str = "", zip_code: str = "", country: str = "",
                    owner_id: str = None) -> str:
@@ -840,9 +964,13 @@ def create_deal(api_key: str, order: dict, contact_id: str = None, company_id: s
             "amount": str(total),
             "dealstage": stage_id,
             "pipeline": "default",
+            "closedate": order_date if order_date else None,  # Cin7 Order Date = HubSpot Close Date
             "description": f"Cin7 Order: {order_ref}\nOrder Date: {order_date_display}\nPayment Terms: {payment_terms}\nOwing: ${total_owing}"
         }
     }
+    
+    # Remove None values from properties
+    deal_data["properties"] = {k: v for k, v in deal_data["properties"].items() if v is not None}
     
     # Set deal owner if provided
     if owner_id:
@@ -1024,6 +1152,10 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
         deal_id = existing_deal['id']
         current_stage = existing_deal.get('properties', {}).get('dealstage', '')
         current_amount = float(existing_deal.get('properties', {}).get('amount', 0) or 0)
+        current_closedate = existing_deal.get('properties', {}).get('closedate', '')
+        
+        # Get the Cin7 order date (the real close date)
+        cin7_order_date = order.get('orderDate') or order.get('createdDate') or ''
         
         # Check if deal needs update
         needs_update = False
@@ -1040,6 +1172,16 @@ def sync_order_to_hubspot(api_key: str, order: dict, cin7_username: str = None, 
             update_props["amount"] = str(total)
             needs_update = True
             result["details"].append(f"Amount: ${current_amount:.2f} → ${total:.2f}")
+        
+        # Check closedate - sync Cin7 Order Date to HubSpot Close Date
+        if cin7_order_date:
+            # Compare dates (just the date portion)
+            cin7_date_str = cin7_order_date[:10] if cin7_order_date else ''
+            current_date_str = current_closedate[:10] if current_closedate else ''
+            if cin7_date_str != current_date_str:
+                update_props["closedate"] = cin7_order_date
+                needs_update = True
+                result["details"].append(f"Close Date: {current_date_str or 'empty'} → {cin7_date_str}")
         
         if needs_update:
             if update_deal(api_key, deal_id, update_props):
@@ -1717,6 +1859,56 @@ def main():
                             
                     except Exception as e:
                         st.error(f"Error reading file: {str(e)}")
+        
+        # -------------------------------------------------------------------------
+        # BULK CLOSE DATE SYNC TOOL
+        # -------------------------------------------------------------------------
+        with st.expander("📅 Bulk Close Date Sync (Fix Historical Deals)"):
+            st.caption("Update close dates on ALL existing HubSpot deals using Cin7 order dates")
+            
+            if not hs_key:
+                st.warning("Enter HubSpot API key first")
+            elif not cin7_user or not cin7_key:
+                st.warning("Enter Cin7 credentials first")
+            else:
+                st.info("""
+                **What this does:**
+                1. Fetches all deals from HubSpot
+                2. Extracts order reference from deal name
+                3. Looks up each order in Cin7 to get the real `orderDate`
+                4. Updates HubSpot `closedate` if it differs
+                
+                ⚠️ This may take several minutes for large deal counts.
+                """)
+                
+                if st.button("🔄 Sync All Deal Close Dates", type="primary", key="bulk_closedate_sync"):
+                    progress_bar = st.progress(0)
+                    status = st.empty()
+                    
+                    def update_progress(pct):
+                        progress_bar.progress(pct)
+                        status.info(f"Processing deals... {int(pct * 100)}%")
+                    
+                    with st.spinner("Syncing close dates from Cin7..."):
+                        updated, skipped, errors, details = bulk_sync_deal_closedates(
+                            hs_key, cin7_user, cin7_key, update_progress
+                        )
+                    
+                    progress_bar.empty()
+                    status.empty()
+                    
+                    st.success(f"✅ Updated: {updated} deals")
+                    if skipped:
+                        st.info(f"⏭️ Skipped: {skipped} (no match, same date, or not found in Cin7)")
+                    if errors:
+                        st.warning(f"⚠️ Errors: {errors}")
+                    
+                    if details:
+                        with st.expander(f"📋 Updated Deals ({len(details)})"):
+                            for detail in details[:50]:
+                                st.caption(f"• {detail}")
+                            if len(details) > 50:
+                                st.caption(f"...and {len(details) - 50} more")
     
     # -------------------------------------------------------------------------
     # MAIN CONTENT
