@@ -1,5 +1,5 @@
 """
-OrderFloz — Cin7 to HubSpot Sync (updated 20260324)
+OrderFloz — Cin7 to HubSpot Sync
 ================================
 - Fetches wholesale orders from Cin7
 - Shows what would be synced to HubSpot
@@ -1421,7 +1421,6 @@ def order_to_summary(order: dict, include_reason: bool = False) -> dict:
         'Customer': customer,
         'Email': order.get('email') or order.get('memberEmail') or '',
         'Order Date': order_date[:10] if order_date else '',
-        'Dispatched': (order.get('dispatchedDate') or '')[:10],
         'Payment': '✅ Paid' if is_paid(order) else '⏳ Unpaid',
         'Deal Stage': get_deal_stage(order)[1],  # "Closed Won" or "Pending Payment"
         'Status': order.get('stage') or order.get('status') or '',
@@ -1964,7 +1963,7 @@ def main():
                 'Select': st.column_config.CheckboxColumn('Select', default=True),
                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
             },
-            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status'],
+            disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Payment', 'Deal Stage', 'Status'],
             key="import_editor"
         )
         
@@ -2001,7 +2000,7 @@ def main():
                     'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
                     'Reason': st.column_config.TextColumn('Reason', width='medium')
                 },
-                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Dispatched', 'Payment', 'Deal Stage', 'Status', 'Reason'],
+                disabled=['Order #', 'Source', 'Segment', 'Total', 'Company', 'Customer', 'Email', 'Order Date', 'Payment', 'Deal Stage', 'Status', 'Reason'],
                 key="review_editor"
             )
             
