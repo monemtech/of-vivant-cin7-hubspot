@@ -1,5 +1,5 @@
 """
-OrderFloz - Cin7 to HubSpot Sync v.20260324
+OrderFloz - Cin7 to HubSpot Sync
 ================================
 - Fetches wholesale orders from Cin7
 - Shows what would be synced to HubSpot
@@ -28,54 +28,9 @@ st.set_page_config(
 )
 
 # =============================================================================
-# ADMIN CONFIGURATION
-# =============================================================================
-BRANDING_FILE = Path(".orderfloz_branding.json")
-
-def get_admin_emails():
-    """Get list of admin emails from secrets."""
-    try:
-        if hasattr(st, 'secrets') and 'admin' in st.secrets:
-            emails = st.secrets.admin.get('emails', [])
-            if isinstance(emails, str):
-                return [emails]
-            return list(emails)
-    except:
-        pass
-    return ["sam@monemtech.com"]  # Default admin
-
-def get_admin_password():
-    """Get admin password from secrets."""
-    try:
-        if hasattr(st, 'secrets') and 'admin' in st.secrets:
-            return st.secrets.admin.get('password', 'orderfloz2024')
-    except:
-        pass
-    return "orderfloz2024"  # Default password - CHANGE IN SECRETS
-
-def is_admin_authenticated():
-    """Check if current session is admin authenticated."""
-    return st.session_state.get('admin_authenticated', False)
-
-def authenticate_admin(email, password):
-    """Verify admin credentials."""
-    admin_emails = get_admin_emails()
-    admin_password = get_admin_password()
-    
-    if email.lower() in [e.lower() for e in admin_emails] and password == admin_password:
-        st.session_state.admin_authenticated = True
-        st.session_state.admin_email = email
-        return True
-    return False
-
-def logout_admin():
-    """Log out admin."""
-    st.session_state.admin_authenticated = False
-    st.session_state.admin_email = None
-
-# =============================================================================
 # BRANDING CONFIGURATION
 # =============================================================================
+BRANDING_FILE = Path(".orderfloz_branding.json")
 def get_default_branding():
     """Return default branding settings."""
     return {
@@ -150,10 +105,6 @@ if 'selected_import' not in st.session_state:
     st.session_state.selected_import = set()
 if 'selected_review' not in st.session_state:
     st.session_state.selected_review = set()
-if 'admin_authenticated' not in st.session_state:
-    st.session_state.admin_authenticated = False
-if 'admin_email' not in st.session_state:
-    st.session_state.admin_email = None
 if 'branding' not in st.session_state:
     st.session_state.branding = load_branding()
 if 'dupe_scan_results' not in st.session_state:
@@ -1698,89 +1649,34 @@ def main():
         
         st.divider()
         
-        # Admin Settings
-        with st.expander("🔐 Admin Settings"):
-            if is_admin_authenticated():
-                st.success(f"✅ Logged in as {st.session_state.get('admin_email', 'Admin')}")
-                
-                if st.button("🚪 Logout"):
-                    logout_admin()
-                    st.rerun()
-                
-                st.divider()
-                st.subheader("🎨 Branding")
-                
-                current_branding = get_branding()
-                
-                new_company = st.text_input("Company Name", value=current_branding.get('company_name', ''))
-                new_logo = st.text_input("Logo URL", value=current_branding.get('logo_url', ''), help="URL to your logo image")
-                new_color = st.color_picker("Primary Color", value=current_branding.get('primary_color', '#1a5276'))
-                new_email = st.text_input("Support Email", value=current_branding.get('support_email', ''))
-                new_powered = st.checkbox("Show 'Powered by OrderFloz'", value=current_branding.get('powered_by', True))
-                
-                if new_logo:
-                    st.caption("Logo preview:")
-                    try:
-                        st.image(new_logo, width=80)
-                    except:
-                        st.warning("⚠️ Could not load logo from URL")
-                
-                if st.button("💾 Save Branding", type="primary"):
-                    updated_branding = {
-                        "company_name": new_company,
-                        "logo_url": new_logo,
-                        "primary_color": new_color,
-                        "accent_color": current_branding.get('accent_color', '#2ecc71'),
-                        "support_email": new_email,
-                        "powered_by": new_powered
-                    }
-                    save_branding(updated_branding)
-                    st.session_state.branding = updated_branding
-                    st.success("✅ Branding saved!")
-                    st.rerun()
-                
-                st.divider()
-                st.subheader("🔧 HubSpot Pipeline Stages")
-                st.caption("View your HubSpot deal stages to configure the connector")
-                
-                if hs_key:
-                    if st.button("🔍 Fetch Pipeline Stages"):
-                        pipelines = fetch_pipeline_stages(hs_key)
-                        if pipelines:
-                            for pipeline in pipelines:
-                                st.markdown(f"**📊 {pipeline['label']}** (ID: `{pipeline['id']}`)")
-                                stage_data = []
-                                for stage in pipeline.get('stages', []):
-                                    stage_data.append({
-                                        "Order": stage['displayOrder'],
-                                        "Stage Name": stage['label'],
-                                        "Stage ID": stage['id']
-                                    })
-                                st.dataframe(pd.DataFrame(stage_data), use_container_width=True, hide_index=True)
-                            
-                            st.info("""
-                            **Current configuration:**
-                            - Closed Won: `closedwon`
-                            - Pending Payment: `decisionmakerboughtin`
-                            
-                            If your stage IDs are different, update `HUBSPOT_STAGE_CLOSED_WON` and `HUBSPOT_STAGE_PENDING_PAYMENT` in the code.
-                            """)
-                        else:
-                            st.warning("Could not fetch pipelines. Check your API key.")
-                else:
-                    st.warning("Enter HubSpot API key first")
-                
-            else:
-                st.caption("Admin login required to edit settings")
-                admin_email = st.text_input("Email", key="admin_email_input")
-                admin_password = st.text_input("Password", type="password", key="admin_password_input")
-                
-                if st.button("🔑 Login"):
-                    if authenticate_admin(admin_email, admin_password):
-                        st.success("✅ Logged in!")
-                        st.rerun()
+        # Pipeline Stages
+        with st.expander("🔧 HubSpot Pipeline Stages"):
+            st.caption("View your HubSpot deal stages to configure the connector")
+            if hs_key:
+                if st.button("🔍 Fetch Pipeline Stages"):
+                    pipelines = fetch_pipeline_stages(hs_key)
+                    if pipelines:
+                        for pipeline in pipelines:
+                            st.markdown(f"**📊 {pipeline['label']}** (ID: `{pipeline['id']}`)")
+                            stage_data = []
+                            for stage in pipeline.get('stages', []):
+                                stage_data.append({
+                                    "Order": stage['displayOrder'],
+                                    "Stage Name": stage['label'],
+                                    "Stage ID": stage['id']
+                                })
+                            st.dataframe(pd.DataFrame(stage_data), use_container_width=True, hide_index=True)
+                        st.info("""
+                        **Current configuration:**
+                        - Closed Won: `closedwon`
+                        - Pending Payment: `decisionmakerboughtin`
+
+                        If your stage IDs are different, update `HUBSPOT_STAGE_CLOSED_WON` and `HUBSPOT_STAGE_PENDING_PAYMENT` in the code.
+                        """)
                     else:
-                        st.error("❌ Invalid credentials")
+                        st.warning("Could not fetch pipelines. Check your API key.")
+            else:
+                st.warning("Enter HubSpot API key first")
         
         # -------------------------------------------------------------------------
         # BULK OWNER SYNC TOOL
