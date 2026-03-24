@@ -1,5 +1,5 @@
 """
-OrderFloz - Cin7 to HubSpot Sync
+OrderFloz - Cin7 to HubSpot Sync v.20260324
 ================================
 - Fetches wholesale orders from Cin7
 - Shows what would be synced to HubSpot
@@ -8,6 +8,7 @@ OrderFloz - Cin7 to HubSpot Sync
 UPDATED: Now uses orderDate (actual sale date) instead of createdDate
 UPDATED: Rep column in order table for owner troubleshooting
 UPDATED: Repairs missing company/contact associations on existing deals
+UPDATED: Pre-sync duplicate scan with user confirmation before any writes
 """
 
 import streamlit as st
@@ -155,6 +156,12 @@ if 'admin_email' not in st.session_state:
     st.session_state.admin_email = None
 if 'branding' not in st.session_state:
     st.session_state.branding = load_branding()
+if 'dupe_scan_results' not in st.session_state:
+    st.session_state.dupe_scan_results = None    # None = not yet scanned
+if 'dupe_scan_order_set' not in st.session_state:
+    st.session_state.dupe_scan_order_set = set() # tracks which order set was scanned
+if 'dupes_to_delete' not in st.session_state:
+    st.session_state.dupes_to_delete = {}        # order_ref -> [deal_ids to delete]
 
 # =============================================================================
 # CONFIG FILE HANDLING
@@ -414,6 +421,51 @@ def search_deal_by_order_ref(api_key: str, order_ref: str) -> dict:
     except:
         pass
     return None
+
+def scan_for_duplicates(api_key: str, order_refs: list, progress_callback=None) -> dict:
+    """
+    Scan HubSpot for duplicate deals across a list of order references.
+    Returns dict: { order_ref: [deal1, deal2, ...] } only for refs with 2+ deals.
+    Each deal includes id, dealname, amount, closedate, createdate.
+    """
+    headers = get_headers(api_key)
+    duplicates = {}
+    total = len(order_refs)
+
+    for i, order_ref in enumerate(order_refs):
+        if progress_callback:
+            progress_callback((i + 1) / total)
+
+        search_body = {
+            "filterGroups": [{
+                "filters": [{
+                    "propertyName": "dealname",
+                    "operator": "CONTAINS_TOKEN",
+                    "value": order_ref
+                }]
+            }],
+            "properties": ["dealname", "amount", "dealstage", "closedate", "createdate"],
+            "sorts": [{"propertyName": "createdate", "direction": "ASCENDING"}],
+            "limit": 20
+        }
+
+        try:
+            r = requests.post(
+                "https://api.hubapi.com/crm/v3/objects/deals/search",
+                headers=headers,
+                json=search_body,
+                timeout=15
+            )
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                # Only keep results where the order ref actually appears in deal name
+                matched = [d for d in results if order_ref in (d.get("properties", {}).get("dealname", ""))]
+                if len(matched) >= 2:
+                    duplicates[order_ref] = matched
+        except:
+            pass
+
+    return duplicates
 
 def search_contact_by_email(api_key: str, email: str) -> dict:
     """Search for existing contact by email. Returns contact dict or None."""
@@ -2366,23 +2418,177 @@ def main():
             st.info(f"ℹ️ {pending_count} orders have outstanding balances and will sync as **Pending Payment** deals.")
         
         st.caption("**Full Sync:** Creates new deals, updates existing deals, syncs contacts & companies, repairs missing associations.")
-        
-        confirm = st.checkbox(f"I confirm I want to sync {total_selected} orders to HubSpot", key="confirm_push")
-        
+
+        # -------------------------------------------------------------------------
+        # STEP 1: PRE-SYNC DUPLICATE SCAN
+        # -------------------------------------------------------------------------
+        st.subheader("Step 1: Scan for Duplicates")
+        st.caption("Check HubSpot for existing duplicate deals before writing anything.")
+
+        # Invalidate prior scan if selected orders have changed
+        if st.session_state.dupe_scan_order_set != all_selected:
+            st.session_state.dupe_scan_results = None
+            st.session_state.dupes_to_delete = {}
+
+        if not hs_key:
+            st.warning("Enter HubSpot API key in sidebar before scanning.")
+        else:
+            if st.button("🔍 Scan for Duplicate Deals", key="run_dupe_scan"):
+                scan_progress = st.progress(0)
+                scan_status = st.empty()
+                scan_status.info("Scanning HubSpot for duplicate deals...")
+
+                def scan_progress_cb(pct):
+                    scan_progress.progress(pct)
+                    scan_status.info(f"Scanning... {int(pct * 100)}%")
+
+                dupe_results = scan_for_duplicates(
+                    hs_key,
+                    list(all_selected),
+                    scan_progress_cb
+                )
+
+                scan_progress.empty()
+                scan_status.empty()
+
+                st.session_state.dupe_scan_results = dupe_results
+                st.session_state.dupe_scan_order_set = all_selected.copy()
+
+                # Default: mark all older dupes for deletion (keep newest per ref)
+                auto_delete = {}
+                for ref, deals in dupe_results.items():
+                    # Deals are sorted ASC by createdate — delete all but the last
+                    auto_delete[ref] = [d["id"] for d in deals[:-1]]
+                st.session_state.dupes_to_delete = auto_delete
+
+            # ---- Show scan results ----
+            if st.session_state.dupe_scan_results is not None:
+                dupe_results = st.session_state.dupe_scan_results
+
+                if not dupe_results:
+                    st.success("✅ No duplicates found. Safe to sync.")
+                else:
+                    st.warning(f"⚠️ Found **{len(dupe_results)}** order ref(s) with duplicate deals in HubSpot.")
+                    st.caption("Review each group below. The newest deal (bottom row) will be **kept**. Older deals are pre-selected for deletion. Uncheck any you want to keep.")
+
+                    updated_delete_map = {}
+
+                    for ref, deals in dupe_results.items():
+                        st.markdown(f"**Order Ref: `{ref}`** — {len(deals)} deals found")
+
+                        # Build display rows
+                        rows = []
+                        for d in deals:
+                            props = d.get("properties", {})
+                            rows.append({
+                                "Deal ID": d["id"],
+                                "Deal Name": props.get("dealname", ""),
+                                "Amount": f"${float(props.get('amount') or 0):,.2f}",
+                                "Close Date": (props.get("closedate") or "")[:10],
+                                "Created": (props.get("createdate") or "")[:10],
+                            })
+
+                        df_dupes = pd.DataFrame(rows)
+
+                        # Mark newest row
+                        newest_id = deals[-1]["id"]
+                        df_dupes["Action"] = df_dupes["Deal ID"].apply(
+                            lambda x: "✅ KEEP (newest)" if x == newest_id else "🗑️ Delete"
+                        )
+
+                        st.dataframe(df_dupes, use_container_width=True, hide_index=True)
+
+                        # Checkbox per older deal
+                        delete_ids_for_ref = []
+                        for d in deals[:-1]:  # All except newest
+                            props = d.get("properties", {})
+                            created = (props.get("createdate") or "")[:10]
+                            amount = f"${float(props.get('amount') or 0):,.2f}"
+                            label = f"Delete: {props.get('dealname', d['id'])} (Created {created}, {amount})"
+                            checked = st.checkbox(label, value=True, key=f"del_{d['id']}")
+                            if checked:
+                                delete_ids_for_ref.append(d["id"])
+
+                        updated_delete_map[ref] = delete_ids_for_ref
+                        st.divider()
+
+                    st.session_state.dupes_to_delete = updated_delete_map
+
+                    total_to_delete = sum(len(v) for v in updated_delete_map.values())
+                    if total_to_delete > 0:
+                        st.error(f"⚠️ **{total_to_delete} duplicate deal(s) will be deleted** before sync runs.")
+                    else:
+                        st.info("No deals marked for deletion. Sync will run normally.")
+
+        # -------------------------------------------------------------------------
+        # STEP 2: CONFIRM & SYNC
+        # -------------------------------------------------------------------------
+        st.subheader("Step 2: Confirm & Sync")
+
+        # Block sync if scan hasn't been run yet
+        scan_done = st.session_state.dupe_scan_results is not None
+        if not scan_done:
+            st.info("👆 Run the duplicate scan above before syncing.")
+
+        confirm = st.checkbox(
+            f"I confirm I want to sync {total_selected} orders to HubSpot",
+            key="confirm_push",
+            disabled=not scan_done
+        )
+
         if st.button(
             f"🔄 SYNC {total_selected} ORDERS TO HUBSPOT (${total_selected_revenue:,.0f})",
             type="primary",
             use_container_width=True,
-            disabled=not confirm or not hs_key
+            disabled=not confirm or not hs_key or not scan_done
         ):
             if not hs_key:
                 st.error("Enter HubSpot API key in sidebar")
             else:
+                headers_hs = get_headers(hs_key)
+
+                # ---- Delete confirmed duplicate deals first ----
+                dupes_to_delete = st.session_state.dupes_to_delete
+                total_to_delete = sum(len(v) for v in dupes_to_delete.values())
+
+                if total_to_delete > 0:
+                    delete_progress = st.progress(0)
+                    delete_status = st.empty()
+                    deleted_count = 0
+                    delete_errors = 0
+
+                    all_delete_ids = [did for ids in dupes_to_delete.values() for did in ids]
+
+                    for i, deal_id in enumerate(all_delete_ids):
+                        delete_status.info(f"🗑️ Deleting duplicate {i + 1}/{total_to_delete}...")
+                        try:
+                            r = requests.delete(
+                                f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}",
+                                headers=headers_hs,
+                                timeout=15
+                            )
+                            if r.status_code == 204:
+                                deleted_count += 1
+                            else:
+                                delete_errors += 1
+                        except:
+                            delete_errors += 1
+                        delete_progress.progress((i + 1) / total_to_delete)
+
+                    delete_progress.empty()
+                    delete_status.empty()
+
+                    if delete_errors == 0:
+                        st.success(f"✅ Deleted {deleted_count} duplicate deal(s). Proceeding with sync...")
+                    else:
+                        st.warning(f"⚠️ Deleted {deleted_count}, {delete_errors} deletion(s) failed. Proceeding with sync...")
+
+                # ---- Run the main sync ----
                 status_container = st.empty()
                 progress_bar = st.progress(0)
-                
+
                 sync_state = {"current": 0, "total": total_selected}
-                
+
                 def update_progress(pct):
                     sync_state["current"] = int(pct * total_selected)
                     progress_bar.progress(pct)
@@ -2390,7 +2596,7 @@ def main():
                         f"🔄 **Syncing to HubSpot...** {sync_state['current']}/{total_selected} orders "
                         f"({int(pct*100)}%)"
                     )
-                
+
                 try:
                     results = push_orders_to_hubspot(
                         hs_key,
@@ -2399,58 +2605,63 @@ def main():
                         cin7_username=cin7_user,
                         cin7_api_key=cin7_key
                     )
-                    
+
                     progress_bar.empty()
                     status_container.empty()
-                    
+
                     created_count = len(results["created"])
                     updated_count = len(results["updated"])
                     skipped_count = len(results["skipped"])
                     failed_count = len(results["failed"])
-                    
+
                     if failed_count == 0:
                         st.success(f"✅ **Sync complete!** {created_count + updated_count + skipped_count} orders processed successfully.")
                     else:
                         st.warning(f"⚠️ **Sync completed with errors.** {failed_count} orders failed.")
-                    
+
                     st.markdown(f"""
                     ### Sync Results
-                    
+
                     | Action | Count | Description |
                     |--------|-------|-------------|
                     | ✅ Created | {created_count} | New deals created |
                     | 🔄 Updated | {updated_count} | Existing deals updated |
                     | ⏭️ Skipped | {skipped_count} | No changes needed |
                     | ❌ Failed | {failed_count} | Errors occurred |
-                    
+
                     | Stage | Count |
                     |-------|-------|
                     | Closed Won | {results['closed_won']} |
                     | Pending Payment | {results['pending_payment']} |
                     """)
-                    
+
                     if results["updated"]:
                         with st.expander(f"🔄 Updated Deals ({updated_count})"):
                             for item in results["updated"]:
                                 st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
-                    
+
                     if results["skipped"]:
                         with st.expander(f"⏭️ Skipped Deals ({skipped_count}) - already synced"):
                             for item in results["skipped"][:20]:
                                 st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
                             if skipped_count > 20:
                                 st.caption(f"...and {skipped_count - 20} more")
-                    
+
                     if results["failed"]:
                         with st.expander(f"❌ Failed ({failed_count})", expanded=True):
                             for item in results["failed"][:10]:
                                 st.caption(f"• **{item['order_ref']}**: {', '.join(item['details'])}")
                             if failed_count > 10:
                                 st.caption(f"...and {failed_count - 10} more")
-                    
+
+                    # Reset scan state after successful sync
+                    st.session_state.dupe_scan_results = None
+                    st.session_state.dupe_scan_order_set = set()
+                    st.session_state.dupes_to_delete = {}
+
                     if failed_count == 0:
                         st.balloons()
-                        
+
                 except Exception as e:
                     progress_bar.empty()
                     status_container.empty()
