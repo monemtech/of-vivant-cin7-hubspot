@@ -113,6 +113,8 @@ if 'dupe_scan_order_set' not in st.session_state:
     st.session_state.dupe_scan_order_set = set() # tracks which order set was scanned
 if 'dupes_to_delete' not in st.session_state:
     st.session_state.dupes_to_delete = {}        # order_ref -> [deal_ids to delete]
+if 'dupe_scan_skipped' not in st.session_state:
+    st.session_state.dupe_scan_skipped = False   # True if user clicked Skip
 
 # =============================================================================
 # CONFIG FILE HANDLING
@@ -1649,8 +1651,13 @@ def main():
         
         st.divider()
         
-        # Pipeline Stages
-        with st.expander("🔧 HubSpot Pipeline Stages"):
+        # Advanced Tools (collapsed by default)
+        with st.expander("🛠️ Advanced Tools", expanded=False):
+            st.caption("Pipeline diagnostics, bulk fixes, and cleanup tools.")
+            st.divider()
+
+            st.markdown("**🔧 HubSpot Pipeline Stages**")
+            with st.expander("View pipeline stages"):
             st.caption("View your HubSpot deal stages to configure the connector")
             if hs_key:
                 if st.button("🔍 Fetch Pipeline Stages"):
@@ -1681,7 +1688,9 @@ def main():
         # -------------------------------------------------------------------------
         # BULK OWNER SYNC TOOL
         # -------------------------------------------------------------------------
-        with st.expander("👥 Bulk Owner Sync (One-Time Setup)"):
+            st.divider()
+            st.markdown("**👥 Bulk Owner Sync (One-Time Setup)**")
+            with st.expander("Sync company/deal owners from spreadsheet"):
             st.caption("Update existing HubSpot Companies and Deals with correct owners based on your mapping spreadsheet")
             
             if not hs_key:
@@ -1757,7 +1766,9 @@ def main():
         # -------------------------------------------------------------------------
         # BULK CLOSE DATE SYNC TOOL
         # -------------------------------------------------------------------------
-        with st.expander("📅 Bulk Close Date Sync (Fix Historical Deals)"):
+            st.divider()
+            st.markdown("**📅 Bulk Close Date Sync (Fix Historical Deals)**")
+            with st.expander("Sync close dates from Cin7 order dates"):
             st.caption("Update close dates on ALL existing HubSpot deals using Cin7 order dates")
             
             if not hs_key:
@@ -1807,7 +1818,9 @@ def main():
         # -------------------------------------------------------------------------
         # HUBSPOT CLEANUP TOOL
         # -------------------------------------------------------------------------
-        with st.expander("🧹 HubSpot Cleanup (Delete Duplicates)"):
+            st.divider()
+            st.markdown("**🧹 HubSpot Cleanup (Delete Duplicates)**")
+            with st.expander("Find and delete duplicate deals"):
             st.caption("Find and delete duplicate or junk deals for a specific company/contact")
             
             if not hs_key:
@@ -2316,10 +2329,10 @@ def main():
         st.caption("**Full Sync:** Creates new deals, updates existing deals, syncs contacts & companies, repairs missing associations.")
 
         # -------------------------------------------------------------------------
-        # STEP 1: PRE-SYNC DUPLICATE SCAN
+        # STEP 1: PRE-SYNC DUPLICATE SCAN (OPTIONAL)
         # -------------------------------------------------------------------------
-        st.subheader("Step 1: Scan for Duplicates")
-        st.caption("Check HubSpot for existing duplicate deals before writing anything.")
+        st.subheader("Step 1: Scan for Duplicates (Optional)")
+        st.caption("Recommended for large or historical syncs. Skip for routine weekly imports.")
 
         # Invalidate prior scan if selected orders have changed
         if st.session_state.dupe_scan_order_set != all_selected:
@@ -2329,39 +2342,51 @@ def main():
         if not hs_key:
             st.warning("Enter HubSpot API key in sidebar before scanning.")
         else:
-            if st.button("🔍 Scan for Duplicate Deals", key="run_dupe_scan"):
-                scan_progress = st.progress(0)
-                scan_status = st.empty()
-                scan_status.info("Scanning HubSpot for duplicate deals...")
+            col_scan, col_skip = st.columns([1, 1])
 
-                def scan_progress_cb(pct):
-                    scan_progress.progress(pct)
-                    scan_status.info(f"Scanning... {int(pct * 100)}%")
+            with col_scan:
+                if st.button("🔍 Scan for Duplicate Deals", key="run_dupe_scan"):
+                    scan_progress = st.progress(0)
+                    scan_status = st.empty()
+                    scan_status.info("Scanning HubSpot for duplicate deals...")
 
-                dupe_results = scan_for_duplicates(
-                    hs_key,
-                    list(all_selected),
-                    scan_progress_cb
-                )
+                    def scan_progress_cb(pct):
+                        scan_progress.progress(pct)
+                        scan_status.info(f"Scanning... {int(pct * 100)}%")
 
-                scan_progress.empty()
-                scan_status.empty()
+                    dupe_results = scan_for_duplicates(
+                        hs_key,
+                        list(all_selected),
+                        scan_progress_cb
+                    )
 
-                st.session_state.dupe_scan_results = dupe_results
-                st.session_state.dupe_scan_order_set = all_selected.copy()
+                    scan_progress.empty()
+                    scan_status.empty()
 
-                # Default: mark all older dupes for deletion (keep newest per ref)
-                auto_delete = {}
-                for ref, deals in dupe_results.items():
-                    # Deals are sorted ASC by createdate — delete all but the last
-                    auto_delete[ref] = [d["id"] for d in deals[:-1]]
-                st.session_state.dupes_to_delete = auto_delete
+                    st.session_state.dupe_scan_results = dupe_results
+                    st.session_state.dupe_scan_order_set = all_selected.copy()
+                    st.session_state.dupe_scan_skipped = False
+
+                    auto_delete = {}
+                    for ref, deals in dupe_results.items():
+                        auto_delete[ref] = [d["id"] for d in deals[:-1]]
+                    st.session_state.dupes_to_delete = auto_delete
+
+            with col_skip:
+                if st.button("⏩ Skip Scan & Sync Directly", key="skip_dupe_scan"):
+                    st.session_state.dupe_scan_results = {}
+                    st.session_state.dupe_scan_order_set = all_selected.copy()
+                    st.session_state.dupe_scan_skipped = True
+                    st.session_state.dupes_to_delete = {}
 
             # ---- Show scan results ----
             if st.session_state.dupe_scan_results is not None:
                 dupe_results = st.session_state.dupe_scan_results
+                skipped = st.session_state.get("dupe_scan_skipped", False)
 
-                if not dupe_results:
+                if skipped:
+                    st.info("⏩ Scan skipped. Proceeding directly to sync.")
+                elif not dupe_results:
                     st.success("✅ No duplicates found. Safe to sync.")
                 else:
                     st.warning(f"⚠️ Found **{len(dupe_results)}** order ref(s) with duplicate deals in HubSpot.")
@@ -2372,7 +2397,6 @@ def main():
                     for ref, deals in dupe_results.items():
                         st.markdown(f"**Order Ref: `{ref}`** — {len(deals)} deals found")
 
-                        # Build display rows
                         rows = []
                         for d in deals:
                             props = d.get("properties", {})
@@ -2385,18 +2409,14 @@ def main():
                             })
 
                         df_dupes = pd.DataFrame(rows)
-
-                        # Mark newest row
                         newest_id = deals[-1]["id"]
                         df_dupes["Action"] = df_dupes["Deal ID"].apply(
                             lambda x: "✅ KEEP (newest)" if x == newest_id else "🗑️ Delete"
                         )
-
                         st.dataframe(df_dupes, use_container_width=True, hide_index=True)
 
-                        # Checkbox per older deal
                         delete_ids_for_ref = []
-                        for d in deals[:-1]:  # All except newest
+                        for d in deals[:-1]:
                             props = d.get("properties", {})
                             created = (props.get("createdate") or "")[:10]
                             amount = f"${float(props.get('amount') or 0):,.2f}"
@@ -2421,10 +2441,10 @@ def main():
         # -------------------------------------------------------------------------
         st.subheader("Step 2: Confirm & Sync")
 
-        # Block sync if scan hasn't been run yet
+        # Unlocked if scan ran OR user skipped
         scan_done = st.session_state.dupe_scan_results is not None
         if not scan_done:
-            st.info("👆 Run the duplicate scan above before syncing.")
+            st.info("👆 Scan for duplicates above, or click ⏩ Skip to sync immediately.")
 
         confirm = st.checkbox(
             f"I confirm I want to sync {total_selected} orders to HubSpot",
