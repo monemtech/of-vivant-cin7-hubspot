@@ -1651,13 +1651,15 @@ def main():
         
         st.divider()
         
-        # Advanced Tools (collapsed by default)
+        # -------------------------------------------------------------------------
+        # ADVANCED TOOLS (collapsed by default)
+        # -------------------------------------------------------------------------
         with st.expander("🛠️ Advanced Tools", expanded=False):
             st.caption("Pipeline diagnostics, bulk fixes, and cleanup tools.")
-            st.divider()
 
+            # -- Pipeline Stages --
+            st.divider()
             st.markdown("**🔧 HubSpot Pipeline Stages**")
-            with st.expander("View pipeline stages"):
             st.caption("View your HubSpot deal stages to configure the connector")
             if hs_key:
                 if st.button("🔍 Fetch Pipeline Stages"):
@@ -1684,15 +1686,11 @@ def main():
                         st.warning("Could not fetch pipelines. Check your API key.")
             else:
                 st.warning("Enter HubSpot API key first")
-        
-        # -------------------------------------------------------------------------
-        # BULK OWNER SYNC TOOL
-        # -------------------------------------------------------------------------
+
+            # -- Bulk Owner Sync --
             st.divider()
             st.markdown("**👥 Bulk Owner Sync (One-Time Setup)**")
-            with st.expander("Sync company/deal owners from spreadsheet"):
             st.caption("Update existing HubSpot Companies and Deals with correct owners based on your mapping spreadsheet")
-            
             if not hs_key:
                 st.warning("Enter HubSpot API key first")
             else:
@@ -1701,11 +1699,9 @@ def main():
                     type=['xlsx', 'xls'],
                     key="owner_mapping_file"
                 )
-                
                 if uploaded_file:
                     try:
                         df = pd.read_excel(uploaded_file)
-                        
                         required_cols = ['Company Name', 'Rep Email']
                         if not all(col in df.columns for col in required_cols):
                             st.error(f"Spreadsheet must have columns: {required_cols}")
@@ -1716,61 +1712,46 @@ def main():
                                 rep_email = str(row.get('Rep Email', '')).strip().lower()
                                 if company and rep_email and rep_email != 'nan':
                                     company_to_rep[company] = rep_email
-                            
                             st.success(f"✅ Loaded {len(company_to_rep)} company → rep mappings")
-                            
                             with st.expander("Preview mappings (first 10)"):
-                                preview_items = list(company_to_rep.items())[:10]
-                                for company, email in preview_items:
-                                    st.caption(f"• {company} → {email}")
-                            
+                                for co, em in list(company_to_rep.items())[:10]:
+                                    st.caption(f"• {co} → {em}")
                             owner_lookup = get_hubspot_owners(hs_key)
                             if owner_lookup:
                                 st.info(f"Found {len(owner_lookup)} HubSpot owners")
                             else:
                                 st.warning("Could not fetch HubSpot owners")
-                            
                             st.divider()
-                            
                             col1, col2 = st.columns(2)
-                            
                             with col1:
                                 if st.button("🔄 Sync Company Owners", type="primary"):
                                     with st.spinner("Updating company owners..."):
                                         updated, skipped, errors = bulk_update_company_owners(
                                             hs_key, company_to_rep, owner_lookup
                                         )
-                                    
                                     st.success(f"✅ Updated: {updated} companies")
                                     if skipped:
-                                        st.info(f"⏭️ Skipped: {skipped} (no match or already set)")
+                                        st.info(f"⏭️ Skipped: {skipped}")
                                     if errors:
                                         st.warning(f"⚠️ Errors: {errors}")
-                            
                             with col2:
                                 if st.button("🔄 Sync Deal Owners", type="primary"):
                                     with st.spinner("Updating deal owners..."):
                                         updated, skipped, errors = bulk_update_deal_owners(
                                             hs_key, company_to_rep, owner_lookup
                                         )
-                                    
                                     st.success(f"✅ Updated: {updated} deals")
                                     if skipped:
-                                        st.info(f"⏭️ Skipped: {skipped} (no match or already set)")
+                                        st.info(f"⏭️ Skipped: {skipped}")
                                     if errors:
                                         st.warning(f"⚠️ Errors: {errors}")
-                            
                     except Exception as e:
                         st.error(f"Error reading file: {str(e)}")
-        
-        # -------------------------------------------------------------------------
-        # BULK CLOSE DATE SYNC TOOL
-        # -------------------------------------------------------------------------
+
+            # -- Bulk Close Date Sync --
             st.divider()
             st.markdown("**📅 Bulk Close Date Sync (Fix Historical Deals)**")
-            with st.expander("Sync close dates from Cin7 order dates"):
             st.caption("Update close dates on ALL existing HubSpot deals using Cin7 order dates")
-            
             if not hs_key:
                 st.warning("Enter HubSpot API key first")
             elif not cin7_user or not cin7_key:
@@ -1782,47 +1763,39 @@ def main():
                 2. Extracts order reference from deal name
                 3. Looks up each order in Cin7 to get the real `orderDate`
                 4. Updates HubSpot `closedate` if it differs
-                
+
                 ⚠️ This may take several minutes for large deal counts.
                 """)
-                
                 if st.button("🔄 Sync All Deal Close Dates", type="primary", key="bulk_closedate_sync"):
                     progress_bar = st.progress(0)
                     status = st.empty()
-                    
+
                     def update_progress(pct):
                         progress_bar.progress(pct)
                         status.info(f"Processing deals... {int(pct * 100)}%")
-                    
+
                     with st.spinner("Syncing close dates from Cin7..."):
                         updated, skipped, errors, details = bulk_sync_deal_closedates(
                             hs_key, cin7_user, cin7_key, update_progress
                         )
-                    
                     progress_bar.empty()
                     status.empty()
-                    
                     st.success(f"✅ Updated: {updated} deals")
                     if skipped:
                         st.info(f"⏭️ Skipped: {skipped} (no match, same date, or not found in Cin7)")
                     if errors:
                         st.warning(f"⚠️ Errors: {errors}")
-                    
                     if details:
                         with st.expander(f"📋 Updated Deals ({len(details)})"):
                             for detail in details[:50]:
                                 st.caption(f"• {detail}")
                             if len(details) > 50:
                                 st.caption(f"...and {len(details) - 50} more")
-        
-        # -------------------------------------------------------------------------
-        # HUBSPOT CLEANUP TOOL
-        # -------------------------------------------------------------------------
+
+            # -- HubSpot Cleanup --
             st.divider()
             st.markdown("**🧹 HubSpot Cleanup (Delete Duplicates)**")
-            with st.expander("Find and delete duplicate deals"):
             st.caption("Find and delete duplicate or junk deals for a specific company/contact")
-            
             if not hs_key:
                 st.warning("Enter HubSpot API key first")
             else:
@@ -1831,10 +1804,8 @@ def main():
                     placeholder="e.g., MONARCH SKIN",
                     key="cleanup_search"
                 )
-                
                 if st.button("🔍 Find Deals", key="cleanup_find") and cleanup_search:
                     headers = get_headers(hs_key)
-                    
                     search_body = {
                         "filterGroups": [{
                             "filters": [{
@@ -1847,7 +1818,6 @@ def main():
                         "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}],
                         "limit": 100
                     }
-                    
                     try:
                         r = requests.post(
                             "https://api.hubapi.com/crm/v3/objects/deals/search",
@@ -1855,7 +1825,6 @@ def main():
                             json=search_body,
                             timeout=30
                         )
-                        
                         if r.status_code == 200:
                             deals = r.json().get('results', [])
                             st.session_state.cleanup_deals = deals
@@ -1866,10 +1835,9 @@ def main():
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
                         st.session_state.cleanup_deals = []
-                
+
                 if 'cleanup_deals' in st.session_state and st.session_state.cleanup_deals:
                     deals = st.session_state.cleanup_deals
-                    
                     deal_data = []
                     for d in deals:
                         props = d.get('properties', {})
@@ -1880,52 +1848,41 @@ def main():
                             'Close Date': (props.get('closedate') or '')[:10],
                             'Created': (props.get('createdate') or '')[:10],
                         })
-                    
-                    df = pd.DataFrame(deal_data)
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                    
+                    st.dataframe(pd.DataFrame(deal_data), use_container_width=True, hide_index=True)
+
                     order_refs = {}
                     for d in deals:
                         name = d.get('properties', {}).get('dealname', '')
-                        if ' - ' in name:
-                            ref = name.split(' - ')[-1].strip()
-                        else:
-                            ref = name.strip()
-                        
-                        if ref not in order_refs:
-                            order_refs[ref] = []
-                        order_refs[ref].append(d)
-                    
-                    duplicates = {ref: deals_list for ref, deals_list in order_refs.items() if len(deals_list) > 1}
-                    
+                        ref = name.split(' - ')[-1].strip() if ' - ' in name else name.strip()
+                        order_refs.setdefault(ref, []).append(d)
+
+                    duplicates = {ref: dl for ref, dl in order_refs.items() if len(dl) > 1}
                     if duplicates:
                         st.warning(f"⚠️ Found {len(duplicates)} order(s) with duplicate deals:")
                         for ref, dup_deals in duplicates.items():
                             st.caption(f"• **{ref}**: {len(dup_deals)} deals")
-                    
+
                     st.divider()
-                    
-                    delete_options = [f"{d.get('id')} - {d.get('properties', {}).get('dealname', '')} (Created: {(d.get('properties', {}).get('createdate') or '')[:10]})" for d in deals]
-                    
+                    delete_options = [
+                        f"{d.get('id')} - {d.get('properties', {}).get('dealname', '')} "
+                        f"(Created: {(d.get('properties', {}).get('createdate') or '')[:10]})"
+                        for d in deals
+                    ]
                     selected_to_delete = st.multiselect(
                         "Select deals to DELETE",
                         options=delete_options,
                         key="deals_to_delete"
                     )
-                    
                     if selected_to_delete:
                         st.error(f"⚠️ You are about to DELETE {len(selected_to_delete)} deal(s). This cannot be undone!")
-                        
                         col1, col2 = st.columns(2)
                         with col1:
-                            confirm = st.checkbox("I understand this is permanent", key="confirm_delete")
-                        
+                            confirm_del = st.checkbox("I understand this is permanent", key="confirm_delete")
                         with col2:
-                            if confirm and st.button("🗑️ DELETE Selected Deals", type="primary", key="delete_deals"):
+                            if confirm_del and st.button("🗑️ DELETE Selected Deals", type="primary", key="delete_deals"):
                                 headers = get_headers(hs_key)
                                 deleted = 0
                                 errors = 0
-                                
                                 progress = st.progress(0)
                                 for i, selection in enumerate(selected_to_delete):
                                     deal_id = selection.split(' - ')[0]
@@ -1941,14 +1898,11 @@ def main():
                                             errors += 1
                                     except:
                                         errors += 1
-                                    
                                     progress.progress((i + 1) / len(selected_to_delete))
-                                
                                 progress.empty()
                                 st.success(f"✅ Deleted {deleted} deal(s)")
                                 if errors:
                                     st.warning(f"⚠️ {errors} deletion(s) failed")
-                                
                                 st.session_state.cleanup_deals = []
                                 st.rerun()
     
