@@ -10,6 +10,7 @@ UPDATED: Rep column in order table for owner troubleshooting
 UPDATED: Repairs missing company/contact associations on existing deals
 UPDATED: Pre-sync duplicate scan with user confirmation before any writes
 UPDATED: Staleness check — tracks and displays time since last successful sync
+UPDATED: Live whitelist filter — only imports orders for accounts with group CM/TP/VL + wholesale stage
 """
 
 import streamlit as st
@@ -106,6 +107,8 @@ if 'dupes_to_delete' not in st.session_state:
     st.session_state.dupes_to_delete = {}
 if 'dupe_scan_skipped' not in st.session_state:
     st.session_state.dupe_scan_skipped = False
+if 'whitelist' not in st.session_state:
+    st.session_state.whitelist = None   # None = not yet fetched; set() = fetched but empty
 
 # =============================================================================
 # CONFIG FILE HANDLING
@@ -152,6 +155,86 @@ def get_staleness_banner() -> tuple:
             return f"🔴 Last synced {days} days ago ({last_dt.strftime('%b %d')}) — data may be stale", "red"
     except:
         return "⚠️ Last sync date unreadable", "red"
+
+# =============================================================================
+# WHITELIST — Qualifying accounts from Cin7 Contacts
+# =============================================================================
+QUALIFYING_GROUPS  = {'CM', 'TP', 'VL'}
+QUALIFYING_STAGE   = 'wholesale'
+
+def fetch_qualifying_accounts(username: str, api_key: str,
+                               progress_callback=None) -> set:
+    """
+    Fetch all active Cin7 contacts where:
+      - isActive = True
+      - group in CM, TP, VL
+      - stages contains 'wholesale'
+
+    Returns a set of normalised (uppercase, stripped) company names.
+    """
+    qualifying = set()
+    page = 1
+    total_checked = 0
+
+    while True:
+        if progress_callback:
+            progress_callback(f"Loading account whitelist... ({len(qualifying)} qualifying so far)")
+
+        try:
+            r = requests.get(
+                "https://api.cin7.com/api/v1/Contacts",
+                auth=(username, api_key),
+                params={"page": page, "rows": 250, "isActive": "true"},
+                timeout=30
+            )
+            if r.status_code != 200:
+                break
+
+            batch = r.json()
+            if not batch:
+                break
+
+            for c in batch:
+                if not isinstance(c, dict):
+                    continue
+
+                total_checked += 1
+                group = str(c.get("group") or "").strip().upper()
+                if group not in QUALIFYING_GROUPS:
+                    continue
+
+                stages_raw = c.get("stages")
+                if isinstance(stages_raw, list):
+                    stages_str = " ".join(str(s).lower() for s in stages_raw)
+                else:
+                    stages_str = str(stages_raw or "").lower()
+
+                if QUALIFYING_STAGE not in stages_str:
+                    continue
+
+                name = str(c.get("name") or "").strip()
+                if name:
+                    qualifying.add(name.upper())
+
+            if len(batch) < 250:
+                break
+            page += 1
+
+        except Exception:
+            break
+
+    return qualifying
+
+
+def is_on_whitelist(order: dict, whitelist: set) -> bool:
+    """Check if an order's company is on the qualifying whitelist."""
+    if not whitelist:
+        return False
+    company = str(
+        order.get('company') or order.get('billingCompany') or ''
+    ).strip().upper()
+    return company in whitelist
+
 
 # =============================================================================
 # CLASSIFICATION
@@ -951,33 +1034,85 @@ def fetch_pipeline_stages(api_key: str) -> list:
 # =============================================================================
 # FILTER ORDERS
 # =============================================================================
-def filter_orders(orders: list, exclude_shopify: bool) -> tuple:
+def filter_orders(orders: list, exclude_shopify: bool,
+                  whitelist: set = None) -> tuple:
+    """
+    Filter orders into: to_import, to_review, to_skip
+
+    Whitelist logic (new):
+      If whitelist is provided, only orders whose company matches a
+      qualifying account (group CM/TP/VL + wholesale stage) are imported.
+      Non-matching orders go to to_skip with reason 'Not on whitelist'.
+
+    Legacy fallback:
+      If whitelist is None or empty, falls back to source-based
+      classification (source = 'Backend') so nothing breaks during
+      a transition period.
+    """
     to_import = []
     to_review = []
-    to_skip = []
+    to_skip   = []
+
+    use_whitelist = bool(whitelist)
+
     for o in orders:
-        source = (o.get('source') or '').lower()
-        total = o.get('total', 0) or 0
-        segment = o.get('_segment', 'Retail')
-        status = (o.get('stage') or o.get('status') or '').lower()
-        company = (o.get('company') or o.get('billingCompany') or '').lower()
+        source    = (o.get('source') or '').lower()
+        total     = o.get('total', 0) or 0
+        status    = (o.get('stage') or o.get('status') or '').lower()
+        company   = (o.get('company') or o.get('billingCompany') or '').lower()
         has_email = bool((o.get('email') or o.get('memberEmail') or '').strip())
-        if segment == 'Retail':
-            o['_skip_reason'] = 'Retail segment'; to_skip.append(o); continue
         email_address = (o.get('email') or o.get('memberEmail') or '').lower()
+
+        # ── Whitelist filter (primary) ──────────────────────────────────
+        if use_whitelist:
+            if not is_on_whitelist(o, whitelist):
+                o['_skip_reason'] = 'Not on whitelist (group/stage)'
+                to_skip.append(o)
+                continue
+        else:
+            # ── Legacy fallback: source-based classification ─────────────
+            segment = o.get('_segment', 'Retail')
+            if segment == 'Retail':
+                o['_skip_reason'] = 'Retail segment'
+                to_skip.append(o)
+                continue
+
+        # ── Internal / Vivant accounts ──────────────────────────────────
         if 'vivant' in company or 'vivant' in email_address:
-            o['_review_reason'] = 'Internal (Vivant in company or email)'; to_review.append(o); continue
-        if exclude_shopify and 'shopify retail' in source:
-            o['_skip_reason'] = 'Shopify Retail excluded'; to_skip.append(o); continue
-        if status not in IMPORTABLE_STATUSES:
-            o['_skip_reason'] = f'Status: {status}'; to_skip.append(o); continue
-        if not has_email and status == 'dispatched':
-            o['_review_reason'] = 'No email (likely employee)'; to_review.append(o); continue
-        if total == 0:
-            if has_email: to_import.append(o)
-            else: o['_review_reason'] = '$0 + No email (likely employee)'; to_review.append(o)
+            o['_review_reason'] = 'Internal (Vivant in company or email)'
+            to_review.append(o)
             continue
+
+        # ── Shopify retail exclusion ────────────────────────────────────
+        if exclude_shopify and 'shopify retail' in source:
+            o['_skip_reason'] = 'Shopify Retail excluded'
+            to_skip.append(o)
+            continue
+
+        # ── Status filter ───────────────────────────────────────────────
+        if status not in IMPORTABLE_STATUSES:
+            o['_skip_reason'] = f'Status: {status}'
+            to_skip.append(o)
+            continue
+
+        # ── No email + dispatched → likely employee ─────────────────────
+        if not has_email and status == 'dispatched':
+            o['_review_reason'] = 'No email (likely employee)'
+            to_review.append(o)
+            continue
+
+        # ── $0 orders ───────────────────────────────────────────────────
+        if total == 0:
+            if has_email:
+                to_import.append(o)
+            else:
+                o['_review_reason'] = '$0 + No email (likely employee)'
+                to_review.append(o)
+            continue
+
+        # ── All checks passed — import ──────────────────────────────────
         to_import.append(o)
+
     return to_import, to_review, to_skip
 
 # =============================================================================
@@ -1089,6 +1224,15 @@ def main():
         # Filters
         st.header("⚙️ Filters")
         exclude_shopify = st.checkbox("Exclude 'Shopify Retail'", value=True)
+
+        # Whitelist status
+        wl = st.session_state.whitelist
+        if wl is None:
+            st.caption("🏢 Whitelist: not loaded — click Fetch Orders")
+        elif len(wl) == 0:
+            st.warning("⚠️ Whitelist empty — no qualifying accounts found")
+        else:
+            st.caption(f"🏢 Whitelist: **{len(wl)} qualifying accounts** (CM/TP/VL + wholesale)")
         st.divider()
 
         # Remember credentials
@@ -1324,6 +1468,24 @@ def main():
             progress_bar = st.progress(0)
             fetch_state = {"last_message": "", "orders": 0, "page": 1}
 
+            # ── Step 1: Build qualifying account whitelist ────────────────
+            status_container.info("🏢 **Loading qualifying accounts from Cin7...** (group CM/TP/VL + wholesale)")
+            progress_bar.progress(0.05)
+
+            whitelist = fetch_qualifying_accounts(
+                cin7_user, cin7_key,
+                progress_callback=lambda msg: status_container.info(f"🏢 **{msg}**")
+            )
+            st.session_state.whitelist = whitelist
+
+            if whitelist:
+                status_container.success(f"✅ **{len(whitelist)} qualifying accounts loaded.** Fetching orders...")
+            else:
+                status_container.warning("⚠️ No qualifying accounts found — check group/stage tags in Cin7.")
+
+            progress_bar.progress(0.1)
+
+            # ── Step 2: Fetch orders ──────────────────────────────────────
             def update_progress(phase, page, orders_so_far, message):
                 fetch_state.update({"last_message": message, "orders": orders_so_far, "page": page})
                 if phase == "fetching": progress = min(0.1 + (page * 0.15), 0.85)
@@ -1350,9 +1512,12 @@ def main():
                 st.session_state.selected_import = set()
                 st.session_state.selected_review = set()
                 if orders:
-                    wholesale_count = sum(1 for o in orders if classify_order(o) == 'Wholesale')
-                    retail_count = len(orders) - wholesale_count
-                    st.success(f"✅ Fetched **{len(orders):,}** orders ({wholesale_count:,} wholesale, {retail_count:,} retail)")
+                    # Count how many pass the whitelist
+                    qualifying_count = sum(1 for o in orders if is_on_whitelist(o, whitelist))
+                    st.success(
+                        f"✅ Fetched **{len(orders):,}** orders — "
+                        f"**{qualifying_count:,}** from your {len(whitelist)} qualifying accounts"
+                    )
                 else:
                     st.warning("No orders found in the selected date range")
             except Exception as e:
@@ -1370,7 +1535,9 @@ def main():
 
     st.caption(f"🟢 {len(orders)} orders loaded (dispatched between {st.session_state.fetch_since} and {st.session_state.fetch_until})")
 
-    to_import, to_review, to_skip = filter_orders(orders, exclude_shopify)
+    to_import, to_review, to_skip = filter_orders(
+        orders, exclude_shopify, whitelist=st.session_state.whitelist
+    )
     retail_orders = [o for o in to_skip if o.get('_segment') == 'Retail']
     other_skipped = [o for o in to_skip if o.get('_segment') != 'Retail']
 
@@ -1826,14 +1993,17 @@ def main():
 
         | Step | Condition | Result |
         |------|-----------|--------|
-        | 1 | Retail segment | ❌ Skip |
-        | 2 | Company contains "vivant" | ❌ Skip (internal) |
+        | 1 | Company NOT on whitelist (group CM/TP/VL + wholesale stage) | ❌ Skip |
+        | 2 | Company contains "vivant" | ⚠️ Review (internal) |
         | 3 | Shopify Retail source | ❌ Skip (if enabled) |
         | 4 | Status not Approved/Dispatched/Voided | ❌ Skip |
         | 5 | No email + Dispatched | ⚠️ Review (likely employee) |
         | 6 | $0 value + Has email | ✅ Import (client sample) |
         | 7 | $0 value + No email | ⚠️ Review (likely employee) |
         | 8 | Has value + Has email | ✅ Import |
+
+        **Whitelist** is built live on every Fetch Orders click from Cin7 Contacts:
+        `isActive = True` + `group in CM, TP, VL` + `stages contains wholesale`
         """)
 
     st.divider()
