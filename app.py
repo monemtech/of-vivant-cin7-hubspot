@@ -353,20 +353,31 @@ def main():
     with st.sidebar:
         st.title("⚙️ Connections")
 
-        st.subheader("Cin7")
-        cin7_user = st.text_input("Username", key="cin7_user")
-        cin7_key  = st.text_input("API Key", type="password", key="cin7_key")
-        if st.button("Test Cin7"):
-            ok, msg = test_cin7(cin7_user, cin7_key)
-            st.success(f"✅ {msg}") if ok else st.error(f"❌ {msg}")
+        # Load from secrets if available, otherwise show input fields
+        cin7_user = st.secrets.get("CIN7_USERNAME", "") if hasattr(st, 'secrets') else ""
+        cin7_key  = st.secrets.get("CIN7_API_KEY", "")  if hasattr(st, 'secrets') else ""
+        hs_key    = st.secrets.get("HUBSPOT_API_KEY", "") if hasattr(st, 'secrets') else ""
+
+        if cin7_user and cin7_key:
+            st.success("✅ Cin7 connected")
+        else:
+            st.subheader("Cin7")
+            cin7_user = st.text_input("Username", key="cin7_user")
+            cin7_key  = st.text_input("API Key", type="password", key="cin7_key")
+            if st.button("Test Cin7"):
+                ok, msg = test_cin7(cin7_user, cin7_key)
+                st.success(f"✅ {msg}") if ok else st.error(f"❌ {msg}")
 
         st.divider()
 
-        st.subheader("HubSpot")
-        hs_key = st.text_input("Private App Token", type="password", key="hs_key")
-        if st.button("Test HubSpot"):
-            ok, msg = test_hubspot(hs_key)
-            st.success(f"✅ {msg}") if ok else st.error(f"❌ {msg}")
+        if hs_key:
+            st.success("✅ HubSpot connected")
+        else:
+            st.subheader("HubSpot")
+            hs_key = st.text_input("Private App Token", type="password", key="hs_key")
+            if st.button("Test HubSpot"):
+                ok, msg = test_hubspot(hs_key)
+                st.success(f"✅ {msg}") if ok else st.error(f"❌ {msg}")
 
         st.divider()
 
@@ -416,17 +427,19 @@ def main():
     st.caption(f"Groups: {groups_label}  ·  Paid → Closed Won  ·  Unpaid → Pending Payment")
 
     if not cin7_user or not cin7_key:
-        st.info("👈 Enter Cin7 credentials in the sidebar.")
+        st.info("👈 Enter your Cin7 username and API key in the sidebar.")
         return
 
-    # Auto-load group map if not in session
+    # Auto-load group map once credentials are present
     if not st.session_state.group_map:
         with st.spinner("Loading qualifying accounts from Cin7... (once per session)"):
             gm = build_group_map(cin7_user, cin7_key, tuple(active_groups))
         if gm:
             st.session_state.group_map = gm
         else:
-            st.error("❌ Could not load accounts. Check Cin7 credentials.")
+            # Clear cache in case bad credentials produced an empty result
+            build_group_map.clear()
+            st.error("❌ No accounts returned. Check that your Cin7 username and API key are correct.")
             return
 
     st.divider()
