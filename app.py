@@ -1,18 +1,5 @@
 """
-OrderFloz — Cin7 to HubSpot Connector  |  Vivant Skincare Wholesale
-
-How it works:
-  1. Build group map from ALL active Cin7 contacts (cached for session).
-     Cin7 doesn't support filtering contacts by name or group via API,
-     so a full scan is required. Runs once per session.
-  2. Pre-filter orders: skip anything with no company, or clearly internal
-     (VIVANT, RETAIL, SAMPLES). No retail logic — just skip internal.
-  3. Match each order's company to the group map.
-     Handles both Cin7 name formats:
-       Full:     "1 (GA) - AYA MEDICAL SPA GEORGIA"
-       On order: "1 (GA) - AYA MEDICAL SPA GEORGIA (6%)"  ← strips pricing tier
-  4. Keep only orders where group is in qualifying list.
-  5. Preview → Sync to HubSpot.
+OrderFloz — Cin7 to HubSpot  |  Vivant Skincare Wholesale
 """
 
 import streamlit as st
@@ -30,15 +17,11 @@ DEFAULT_GROUPS      = ['CM', 'TP', 'VL']
 PAID_STAGE_ID       = "closedwon"
 UNPAID_STAGE_ID     = "qualifiedtobuy"
 
-# Internal account keywords — skip without group lookup
-INTERNAL_KEYWORDS = ['vivant', 'retail', 'samples', 'sample']
-
 for k, v in [
     ('qualified_orders',  None),
     ('skipped_orders',    None),
-    ('fetch_label',       ''),
     ('qualifying_groups', DEFAULT_GROUPS),
-    ('group_map',         None),   # {NORMALIZED_NAME: group} — built once per session
+    ('group_map',         None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -46,49 +29,32 @@ for k, v in [
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NAME NORMALIZATION
-# Orders store company as: "1 (GA) - AYA MEDICAL SPA GEORGIA (6%)"
-# Cin7 contacts store as:  "1 (GA) - AYA MEDICAL SPA GEORGIA"
-# We normalize both sides the same way before matching.
+# Order names:   "1 (GA) - AYA MEDICAL SPA GEORGIA (6%)"
+# Contact names: "1 (GA) - AYA MEDICAL SPA GEORGIA"
+# Strip pricing suffix and branch prefix for reliable matching
 # ─────────────────────────────────────────────────────────────────────────────
-def normalize(s: str) -> str:
-    """Uppercase, strip whitespace, remove pricing tier suffix e.g. (6%)."""
-    s = str(s or '').strip().upper()
-    s = re.sub(r'\s*\(\d+\.?\d*%\)\s*$', '', s)   # strip (6%), (10.5%) etc
-    s = re.sub(r'\s+', ' ', s).strip()
-    return s
+def norm(s):
+    s = re.sub(r'\s*\(\d+\.?\d*%\)\s*$', '', str(s or '').strip().upper())
+    return re.sub(r'\s+', ' ', s).strip()
 
-def strip_branch(s: str) -> str:
-    """
-    Strip Cin7 branch prefix: "1 (GA) - AYA MEDICAL SPA GEORGIA" → "AYA MEDICAL SPA GEORGIA"
-    Returns the part after the first ' - ', or the original if no ' - '.
-    """
-    n = normalize(s)
+def strip_branch(s):
+    n = norm(s)
     return n.split(' - ', 1)[1].strip() if ' - ' in n else n
 
 
-def is_internal(company: str) -> bool:
-    """Return True if company name looks internal/retail."""
-    low = (company or '').lower()
-    return any(kw in low for kw in INTERNAL_KEYWORDS)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# GROUP MAP — full Cin7 contact scan, cached for session
+# GROUP MAP — scan all active Cin7 contacts, cache result
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
-def build_group_map(username: str, api_key: str, qualifying_groups: tuple) -> dict:
+def build_group_map(username, api_key, groups_tuple):
     """
-    Scan ALL active Cin7 contacts. Build a lookup dict:
-      { NORMALIZED_NAME: group_code }
-    Indexed by BOTH the full normalized name AND the branch-stripped name
-    so matching works regardless of order format.
-    Only includes contacts whose group is in qualifying_groups.
-    Cached for 24 hours.
+    Scan all active Cin7 contacts. Return {normalized_name: group}
+    for contacts whose group is in groups_tuple.
+    Indexed by both full name and branch-stripped name.
+    Cached 24 hours.
     """
-    groups  = set(qualifying_groups)
-    gmap    = {}
-    page    = 1
-
+    groups = set(groups_tuple)
+    gmap, page = {}, 1
     while True:
         try:
             r = requests.get(
@@ -97,46 +63,32 @@ def build_group_map(username: str, api_key: str, qualifying_groups: tuple) -> di
                 params={"page": page, "rows": 250, "isActive": "true"},
                 timeout=30
             )
-            if r.status_code != 200:
-                break
+            if r.status_code != 200: break
             batch = r.json()
-            if not batch:
-                break
-
+            if not batch: break
             for c in batch:
-                if not isinstance(c, dict):
-                    continue
+                if not isinstance(c, dict): continue
                 group = str(c.get('group') or '').strip().upper()
-                if group not in groups:
-                    continue
-                raw = str(c.get('name') or '').strip()
-                if not raw:
-                    continue
-                full_key     = normalize(raw)
-                stripped_key = strip_branch(raw)
-                gmap[full_key]     = group
-                gmap[stripped_key] = group
-
-            if len(batch) < 250:
-                break
+                if group not in groups: continue
+                name = str(c.get('name') or '').strip()
+                if not name: continue
+                gmap[norm(name)]         = group
+                gmap[strip_branch(name)] = group
+            if len(batch) < 250: break
             page += 1
-
         except Exception:
             break
-
     return gmap
 
 
-def get_order_group(order: dict, gmap: dict) -> str:
-    """Match order company to group map. Tries full name and branch-stripped name."""
+def get_group(order, gmap):
     raw = str(order.get('company') or order.get('billingCompany') or '').strip()
-    if not raw:
-        return ''
-    return gmap.get(normalize(raw)) or gmap.get(strip_branch(raw)) or ''
+    if not raw: return ''
+    return gmap.get(norm(raw)) or gmap.get(strip_branch(raw)) or ''
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CIN7 — ORDERS
+# CIN7
 # ─────────────────────────────────────────────────────────────────────────────
 def test_cin7(u, k):
     try:
@@ -166,36 +118,20 @@ def fetch_orders(u, k, since, until):
 
 
 def filter_orders(orders, gmap, qualifying_groups):
-    groups    = set(qualifying_groups)
-    to_import = []
-    to_skip   = []
-
+    groups = set(qualifying_groups)
+    to_import, to_skip = [], []
     for o in orders:
-        company = str(o.get('company') or o.get('billingCompany') or '').strip()
-        status  = str(o.get('stage') or o.get('status') or '').lower()
-
-        # Skip internal/retail immediately — no group lookup needed
-        if is_internal(company) or not company:
-            o['_skip_reason'] = 'Internal/retail'
-            to_skip.append(o)
-            continue
-
-        # Check group
-        group = get_order_group(o, gmap)
+        group  = get_group(o, gmap)
+        status = str(o.get('stage') or o.get('status') or '').lower()
         if group not in groups:
             o['_skip_reason'] = f'Group: {group or "none"}'
             to_skip.append(o)
-            continue
-
-        # Check status
-        if status not in IMPORTABLE_STATUSES:
+        elif status not in IMPORTABLE_STATUSES:
             o['_skip_reason'] = f'Status: {status}'
             to_skip.append(o)
-            continue
-
-        o['_group'] = group
-        to_import.append(o)
-
+        else:
+            o['_group'] = group
+            to_import.append(o)
     return to_import, to_skip
 
 
@@ -250,7 +186,7 @@ def search_deal(k, ref):
 def update_deal(k, did, props):
     try:
         return requests.patch(f"https://api.hubapi.com/crm/v3/objects/deals/{did}",
-                              headers=hdr(k), json={"properties":props},
+                              headers=hdr(k), json={"properties": props},
                               timeout=15).status_code == 200
     except: return False
 
@@ -262,7 +198,7 @@ def search_or_create_contact(k, email, first, last, company, phone):
         r = requests.post("https://api.hubapi.com/crm/v3/objects/contacts/search",
                           headers=hdr(k), json=body, timeout=15)
         if r.status_code == 200:
-            res = r.json().get('results',[])
+            res = r.json().get('results', [])
             if res: return res[0]['id']
     except: pass
     try:
@@ -281,7 +217,7 @@ def search_or_create_company(k, name, phone, address, city, state, zipcode, coun
         r = requests.post("https://api.hubapi.com/crm/v3/objects/companies/search",
                           headers=hdr(k), json=body, timeout=15)
         if r.status_code == 200:
-            res = r.json().get('results',[])
+            res = r.json().get('results', [])
             if res: return res[0]['id']
     except: pass
     try:
@@ -297,7 +233,7 @@ def create_deal_hs(k, order, contact_id, company_id, owner_id):
     stage_id, stage_label = get_stage(order)
     ref   = order.get('reference','')
     co    = order.get('company') or order.get('billingCompany') or ''
-    total = order.get('total',0) or 0
+    total = order.get('total', 0) or 0
     odate = order.get('orderDate') or order.get('createdDate') or ''
     props = {x:y for x,y in {
         "dealname": f"{co} - {ref}" if co else ref,
@@ -437,44 +373,40 @@ def main():
         # Group map status
         gm = st.session_state.group_map
         if gm:
-            unique = len(gm) // 2
             q = set(st.session_state.qualifying_groups)
-            st.success(f"✅ {unique} accounts loaded")
+            unique = len({v: None for v in gm.values()})
+            st.success(f"✅ Accounts loaded")
             for g in sorted(q):
-                c = sum(1 for k, v in gm.items() if v == g and ' - ' not in k)
+                c = sum(1 for key, v in gm.items()
+                        if v == g and ' - ' not in key and not re.search(r'\d+\s*\(', key))
                 if c: st.caption(f"  {g}: {c}")
-            if st.button("🔄 Reload", help="Re-fetch accounts from Cin7"):
+            if st.button("🔄 Reload accounts"):
                 build_group_map.clear()
                 st.session_state.group_map = None
                 st.rerun()
-        else:
-            st.caption("Accounts not loaded yet")
 
         st.divider()
 
         # Qualifying groups
         with st.expander("🏷️ Qualifying Groups", expanded=False):
-            st.caption("Only accounts with these Cin7 group codes will be imported.")
+            st.caption("Cin7 group codes that qualify for import.")
             current = st.session_state.qualifying_groups
             for i, g in enumerate(current):
-                c1, c2 = st.columns([3,1])
-                with c1:
-                    st.code(g)
+                c1, c2 = st.columns([3, 1])
+                with c1: st.code(g)
                 with c2:
-                    if st.button("✕", key=f"del_{i}", help=f"Remove {g}"):
+                    if st.button("✕", key=f"del_{i}"):
                         st.session_state.qualifying_groups = [x for j,x in enumerate(current) if j!=i]
                         build_group_map.clear()
                         st.session_state.group_map = None
                         st.rerun()
-            new_g = st.text_input("Add group code", placeholder="e.g. DI", key="new_grp").strip().upper()
+            new_g = st.text_input("Add code", placeholder="e.g. DI", key="new_grp").strip().upper()
             if st.button("➕ Add", use_container_width=True):
                 if new_g and new_g not in st.session_state.qualifying_groups:
                     st.session_state.qualifying_groups.append(new_g)
                     build_group_map.clear()
                     st.session_state.group_map = None
                     st.rerun()
-                elif new_g in st.session_state.qualifying_groups:
-                    st.warning(f"{new_g} already in list")
 
     # ── Main ──────────────────────────────────────────────────────────────────
     active_groups = st.session_state.qualifying_groups
@@ -487,23 +419,18 @@ def main():
         st.info("👈 Enter Cin7 credentials in the sidebar.")
         return
 
-    # ── Load group map if needed ──────────────────────────────────────────────
+    # Auto-load group map if not in session
     if not st.session_state.group_map:
-        st.divider()
-        st.info(f"⏳ Load qualifying accounts first. This scans Cin7 once and caches for 24 hours.")
-        if st.button("▶️ Load Accounts", type="primary", use_container_width=True):
-            with st.spinner(f"Scanning Cin7 contacts for groups {groups_label}..."):
-                gm = build_group_map(cin7_user, cin7_key, tuple(active_groups))
-            if gm:
-                st.session_state.group_map = gm
-                st.rerun()
-            else:
-                st.error("❌ Could not load accounts. Check Cin7 credentials.")
-        return
+        with st.spinner("Loading qualifying accounts from Cin7... (once per session)"):
+            gm = build_group_map(cin7_user, cin7_key, tuple(active_groups))
+        if gm:
+            st.session_state.group_map = gm
+        else:
+            st.error("❌ Could not load accounts. Check Cin7 credentials.")
+            return
 
     st.divider()
     st.subheader("📅 Select Date Range")
-    st.caption("Fetches dispatched orders · matches company to pre-loaded group map")
 
     col1, col2 = st.columns(2)
     with col1: since_date = st.date_input("From", value=datetime.now() - timedelta(days=7))
@@ -527,7 +454,6 @@ def main():
 
         st.session_state.qualified_orders = to_import
         st.session_state.skipped_orders   = to_skip
-        st.session_state.fetch_label      = f"{since_date} → {until_date}"
 
     # ── Preview ───────────────────────────────────────────────────────────────
     if st.session_state.qualified_orders is not None:
