@@ -24,10 +24,10 @@ PAID_STAGE_ID       = "closedwon"
 UNPAID_STAGE_ID     = "qualifiedtobuy"
 
 for k, v in [
-    ('qualified_orders',  None),
-    ('skipped_orders',    None),
-    ('qualifying_groups', DEFAULT_GROUPS),
-    ('member_cache',      {}),   # {memberId: group} — persists across fetches
+    ('qualified_orders',   None),
+    ('skipped_orders',     None),
+    ('qualifying_groups',  DEFAULT_GROUPS),
+    ('qualifying_members', None),  # {contact_id: group} — built once, cached 24hrs
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -45,8 +45,41 @@ def test_cin7(u, k):
         return False, str(e)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def build_qualifying_members(username, api_key, groups_tuple):
+    """
+    Fetch all active Cin7 contacts where group is in groups_tuple.
+    Returns {contact_id: group_code} — the qualifying member set.
+    Cached 24 hours.
+    """
+    groups = set(groups_tuple)
+    members, page = {}, 1
+    while True:
+        try:
+            r = requests.get(
+                "https://api.cin7.com/api/v1/Contacts",
+                auth=(username, api_key),
+                params={"page": page, "rows": 250, "isActive": "true"},
+                timeout=30)
+            if r.status_code != 200: break
+            batch = r.json()
+            if not batch: break
+            for c in batch:
+                if not isinstance(c, dict): continue
+                group = str(c.get('group') or '').strip().upper()
+                if group not in groups: continue
+                cid = str(c.get('id') or '').strip()
+                if cid:
+                    members[cid] = group
+            if len(batch) < 250: break
+            page += 1
+        except Exception:
+            break
+    return members
+
+
 def fetch_backend_orders(u, k, since, until):
-    """Fetch orders where source='Backend' AND stage='Dispatched' for the date range."""
+    """Fetch orders where source='Backend' AND stage='Dispatched'."""
     start = since.strftime("%Y-%m-%dT00:00:00Z")
     end   = until.strftime("%Y-%m-%dT23:59:59Z")
     orders, page = [], 1
@@ -68,65 +101,20 @@ def fetch_backend_orders(u, k, since, until):
     return orders
 
 
-def lookup_group_by_member_id(u, k, member_id):
-    """Direct contact lookup by ID. Returns group string or ''."""
-    try:
-        r = requests.get(
-            f"https://api.cin7.com/api/v1/Contacts/{member_id}",
-            auth=(u, k), timeout=15)
-        if r.status_code == 200:
-            c = r.json()
-            if isinstance(c, list) and c:
-                c = c[0]
-            if isinstance(c, dict):
-                return str(c.get('group') or '').strip().upper()
-    except Exception:
-        pass
-    return ''
-
-
-def enrich_orders_with_groups(u, k, orders, existing_cache):
-    """
-    Look up group for each unique memberId in the orders.
-    Uses session cache — only new memberIds hit the API.
-    Returns updated cache.
-    """
-    cache       = dict(existing_cache)
-    member_ids  = {str(o.get('memberId') or '') for o in orders
-                   if o.get('memberId')}
-    to_lookup   = [mid for mid in member_ids if mid not in cache]
-
-    if not to_lookup:
-        return cache
-
-    lock = threading.Lock()
-
-    def fetch_one(mid):
-        group = lookup_group_by_member_id(u, k, mid)
-        with lock:
-            cache[mid] = group
-
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        list(ex.map(fetch_one, to_lookup))
-
-    return cache
-
-
-def filter_orders(orders, member_cache, qualifying_groups):
-    groups = set(qualifying_groups)
-    to_import, to_skip = [], []
+def filter_orders(orders, qualifying_members, qualifying_groups):
+    """Keep only orders whose memberId is in the qualifying member set."""
+    groups    = set(qualifying_groups)
+    to_import = []
+    to_skip   = []
     for o in orders:
-        mid   = str(o.get('memberId') or '')
-        group = member_cache.get(mid, '') if mid else ''
-
-        if group not in groups:
-            o['_skip_reason'] = f'Group: {group or "none"}'
+        mid   = str(o.get('memberId') or '').strip()
+        group = qualifying_members.get(mid, '') if mid else ''
+        if group in groups:
+            o['_group'] = group
+            to_import.append(o)
+        else:
+            o['_skip_reason'] = f'Member not in qualifying set (group: {group or "none"})'
             to_skip.append(o)
-            continue
-
-        o['_group'] = group
-        to_import.append(o)
-
     return to_import, to_skip
 
 
@@ -370,15 +358,20 @@ def main():
 
         st.divider()
 
-        # Member cache status
-        mc = st.session_state.member_cache
-        if mc:
+        # Qualifying members status
+        qm = st.session_state.qualifying_members
+        if qm:
             q = set(st.session_state.qualifying_groups)
-            st.caption(f"🏢 {len(mc)} contacts cached · "
-                       f"{sum(1 for v in mc.values() if v in q)} qualifying")
-            if st.button("🗑️ Clear cache"):
-                st.session_state.member_cache = {}
+            st.success(f"✅ {len(qm)} qualifying accounts loaded")
+            for g in sorted(q):
+                c = sum(1 for v in qm.values() if v == g)
+                if c: st.caption(f"  {g}: {c}")
+            if st.button("🔄 Reload accounts"):
+                build_qualifying_members.clear()
+                st.session_state.qualifying_members = None
                 st.rerun()
+        else:
+            st.caption("Accounts not loaded yet")
 
         st.divider()
 
@@ -392,13 +385,15 @@ def main():
                 with c2:
                     if st.button("✕", key=f"del_{i}"):
                         st.session_state.qualifying_groups = [x for j,x in enumerate(current) if j!=i]
-                        st.session_state.member_cache = {}
+                        build_qualifying_members.clear()
+                        st.session_state.qualifying_members = None
                         st.rerun()
             new_g = st.text_input("Add code", placeholder="e.g. DI", key="new_grp").strip().upper()
             if st.button("➕ Add", use_container_width=True):
                 if new_g and new_g not in st.session_state.qualifying_groups:
                     st.session_state.qualifying_groups.append(new_g)
-                    st.session_state.member_cache = {}
+                    build_qualifying_members.clear()
+                    st.session_state.qualifying_members = None
                     st.rerun()
 
     # ── Main ──────────────────────────────────────────────────────────────────
@@ -412,9 +407,20 @@ def main():
         st.info("👈 Enter Cin7 credentials in the sidebar.")
         return
 
+    # Auto-load qualifying members once per session
+    if not st.session_state.qualifying_members:
+        with st.spinner("Loading qualifying accounts from Cin7... (once per session)"):
+            qm = build_qualifying_members(cin7_user, cin7_key, tuple(active_groups))
+        if qm:
+            st.session_state.qualifying_members = qm
+        else:
+            build_qualifying_members.clear()
+            st.error("❌ No accounts returned. Check Cin7 credentials.")
+            return
+
     st.divider()
     st.subheader("📅 Select Date Range")
-    st.caption("Fetches wholesale (Backend) orders · looks up group by member ID")
+    st.caption("Fetches Backend + Dispatched orders · matches by member ID")
 
     col1, col2 = st.columns(2)
     with col1: since_date = st.date_input("From", value=datetime.now() - timedelta(days=7))
@@ -424,7 +430,6 @@ def main():
         since = datetime.combine(since_date, datetime.min.time())
         until = datetime.combine(until_date, datetime.max.time())
 
-        # Step 1: fetch Backend orders only
         with st.spinner("📦 Fetching wholesale orders from Cin7..."):
             orders = fetch_backend_orders(cin7_user, cin7_key, since, until)
 
@@ -434,25 +439,8 @@ def main():
             st.session_state.skipped_orders   = []
             return
 
-        # Step 2: look up group via memberId (cached)
-        cached     = st.session_state.member_cache
-        new_ids    = [str(o.get('memberId') or '') for o in orders
-                      if o.get('memberId') and str(o.get('memberId')) not in cached]
-        unique_new = len(set(new_ids))
-        n_cached   = len({str(o.get('memberId') or '') for o in orders
-                          if o.get('memberId') and str(o.get('memberId')) in cached})
-
-        note = f" ({n_cached} from cache)" if n_cached else ""
-        if unique_new:
-            with st.spinner(f"🏢 Looking up group for {unique_new} contacts{note}..."):
-                updated = enrich_orders_with_groups(cin7_user, cin7_key, orders, cached)
-                st.session_state.member_cache = updated
-        else:
-            st.session_state.member_cache = cached
-
-        # Step 3: filter
         to_import, to_skip = filter_orders(
-            orders, st.session_state.member_cache, active_groups)
+            orders, st.session_state.qualifying_members, active_groups)
 
         st.session_state.qualified_orders = to_import
         st.session_state.skipped_orders   = to_skip
