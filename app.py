@@ -337,22 +337,20 @@ def main():
         st.title("⚙️ Connections")
 
         # Read from Streamlit secrets
-        cin7_user = st.secrets.get("CIN7_USERNAME", "") if hasattr(st, 'secrets') else ""
-        cin7_key  = st.secrets.get("CIN7_API_KEY", "")  if hasattr(st, 'secrets') else ""
-        hs_key    = st.secrets.get("HUBSPOT_API_KEY", "") if hasattr(st, 'secrets') else ""
-
-        if cin7_user and cin7_key:
+        try:
+            cin7_user = st.secrets["CIN7_USERNAME"]
+            cin7_key  = st.secrets["CIN7_API_KEY"]
+            hs_key    = st.secrets["HUBSPOT_API_KEY"]
             st.success("✅ Cin7 connected")
-        else:
+            st.success("✅ HubSpot connected")
+        except Exception:
+            cin7_user = ""
+            cin7_key  = ""
+            hs_key    = ""
             st.subheader("Cin7")
             cin7_user = st.text_input("Username", key="cin7_user")
             cin7_key  = st.text_input("API Key", type="password", key="cin7_key")
-
-        st.divider()
-
-        if hs_key:
-            st.success("✅ HubSpot connected")
-        else:
+            st.divider()
             st.subheader("HubSpot")
             hs_key = st.text_input("Private App Token", type="password", key="hs_key")
 
