@@ -46,7 +46,7 @@ def test_cin7(u, k):
 
 
 def fetch_backend_orders(u, k, since, until):
-    """Fetch orders where source='Backend' for the date range."""
+    """Fetch orders where source='Backend' AND stage='Dispatched' for the date range."""
     start = since.strftime("%Y-%m-%dT00:00:00Z")
     end   = until.strftime("%Y-%m-%dT23:59:59Z")
     orders, page = [], 1
@@ -58,9 +58,10 @@ def fetch_backend_orders(u, k, since, until):
         if r.status_code != 200: break
         batch = r.json()
         if not batch: break
-        # Filter to Backend source only
         for o in batch:
-            if str(o.get('source') or '').strip().lower() == 'backend':
+            source = str(o.get('source') or '').strip().lower()
+            status = str(o.get('stage') or o.get('status') or '').strip().lower()
+            if source == 'backend' and status == 'dispatched':
                 orders.append(o)
         if len(batch) < 250: break
         page += 1
@@ -465,18 +466,16 @@ def main():
 
         # ── Financial Summary Card ────────────────────────────────────────────
         if to_import:
-            total_rev     = sum(o.get('total',0) or 0 for o in to_import)
-            total_owing   = sum(o.get('totalOwing',0) or 0 for o in to_import)
-            paid_orders   = [o for o in to_import if is_paid(o)]
+            total_rev   = sum(o.get('total',0) or 0 for o in to_import)
+            paid_orders = [o for o in to_import if is_paid(o)]
             unpaid_orders = [o for o in to_import if not is_paid(o)]
-            paid_rev      = sum(o.get('total',0) or 0 for o in paid_orders)
             unpaid_owing  = sum(o.get('totalOwing',0) or 0 for o in unpaid_orders)
 
             st.subheader("📊 Sales Summary")
 
             r1c1, r1c2 = st.columns(2)
-            with r1c1: st.metric("Total Revenue",   f"${total_rev:,.2f}")
-            with r1c2: st.metric("Avg Order Value",  f"${total_rev/len(to_import):,.2f}")
+            with r1c1: st.metric("Total Revenue",  f"${total_rev:,.2f}")
+            with r1c2: st.metric("Avg Order Value", f"${total_rev/len(to_import):,.2f}")
 
             st.divider()
 
@@ -489,18 +488,10 @@ def main():
                                   len(unpaid_orders),
                                   delta=f"${unpaid_owing:,.0f} owing" if unpaid_owing else "✅ None",
                                   delta_color="inverse")
-        else:
-            st.info(f"No qualifying orders (groups: {groups_label}) found in this date range.")
 
-        st.divider()
+            st.divider()
+            st.subheader(f"✅ Orders Ready to Import ({len(to_import)})")
 
-        # ── Paid orders — importable ──────────────────────────────────────────
-        paid_list   = [o for o in to_import if is_paid(o)]
-        unpaid_list = [o for o in to_import if not is_paid(o)]
-
-        st.subheader(f"✅ Paid Orders — Ready to Import ({len(paid_list)})")
-
-        if paid_list:
             rows = [{
                 'Order #':    o.get('reference',''),
                 'Company':    o.get('company') or o.get('billingCompany') or '',
@@ -508,7 +499,8 @@ def main():
                 'Order Date': (o.get('orderDate') or o.get('createdDate') or '')[:10],
                 'Status':     o.get('stage') or o.get('status') or '',
                 'Total':      float(o.get('total',0) or 0),
-            } for o in paid_list]
+                'Payment':    '✅ Paid' if is_paid(o) else '⏳ Unpaid',
+            } for o in to_import]
 
             df = pd.DataFrame(rows).sort_values('Total', ascending=False)
             st.dataframe(df, use_container_width=True, hide_index=True,
@@ -520,12 +512,12 @@ def main():
             if not hs_key:
                 st.warning("Enter HubSpot Private App Token in the sidebar.")
             else:
-                st.info(f"Will sync **{len(paid_list)} paid orders** → deals, contacts, companies, line items.")
+                st.info(f"Will sync **{len(to_import)} orders** → deals, contacts, companies, line items.")
                 if st.button("▶️ Start Sync", type="primary", use_container_width=True):
                     with st.spinner("Loading HubSpot owner list..."):
                         owners = get_owners(hs_key)
-                    with st.spinner(f"Syncing {len(paid_list)} orders..."):
-                        counts = batch_sync(hs_key, paid_list, owners)
+                    with st.spinner(f"Syncing {len(to_import)} orders..."):
+                        counts = batch_sync(hs_key, to_import, owners)
                     st.success(
                         f"✅ Done — **{counts['created']}** created · "
                         f"**{counts['updated']}** updated · "
@@ -538,28 +530,7 @@ def main():
                     if counts['failed'] == 0:
                         st.balloons()
         else:
-            st.info("No paid orders found in this date range.")
-
-        # ── Unpaid orders — view only ─────────────────────────────────────────
-        if unpaid_list:
-            st.divider()
-            with st.expander(f"⏳ Unpaid Orders — View Only ({len(unpaid_list)})"):
-                st.caption("These orders have outstanding balances and are not included in the sync.")
-                unpaid_rows = [{
-                    'Order #':    o.get('reference',''),
-                    'Company':    o.get('company') or o.get('billingCompany') or '',
-                    'Group':      o.get('_group',''),
-                    'Order Date': (o.get('orderDate') or o.get('createdDate') or '')[:10],
-                    'Status':     o.get('stage') or o.get('status') or '',
-                    'Total':      float(o.get('total',0) or 0),
-                    'Owing':      float(o.get('totalOwing',0) or 0),
-                } for o in unpaid_list]
-                st.dataframe(pd.DataFrame(unpaid_rows).sort_values('Owing', ascending=False),
-                             use_container_width=True, hide_index=True,
-                             column_config={
-                                 'Total': st.column_config.NumberColumn('Total', format='$ %.2f'),
-                                 'Owing': st.column_config.NumberColumn('Owing', format='$ %.2f'),
-                             })
+            st.info(f"No qualifying orders (groups: {groups_label}) found in this date range.")
 
         if to_skip:
             with st.expander(f"⏭️ Skipped ({len(to_skip)})"):
