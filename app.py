@@ -217,11 +217,20 @@ def create_deal_hs(k, order, contact_id, company_id, owner_id):
     ref   = order.get('reference','')
     co    = order.get('company') or order.get('billingCompany') or ''
     total = order.get('total', 0) or 0
-    odate = order.get('orderDate') or order.get('createdDate') or ''
+
+    # Use orderDate → createdDate → dispatchedDate in that priority
+    raw_date = (order.get('orderDate') or
+                order.get('createdDate') or
+                order.get('dispatchedDate') or '')
+
+    # HubSpot closedate must be ISO format date string (YYYY-MM-DD) or timestamp
+    # Strip time portion to avoid timezone issues
+    odate = raw_date[:10] if raw_date else None
+
     props = {x:y for x,y in {
         "dealname": f"{co} - {ref}" if co else ref,
         "amount": str(total), "dealstage": stage_id, "pipeline": "default",
-        "closedate": odate or None, "hubspot_owner_id": owner_id or None,
+        "closedate": odate, "hubspot_owner_id": owner_id or None,
     }.items() if y}
     try:
         r = requests.post("https://api.hubapi.com/crm/v3/objects/deals",
@@ -289,8 +298,9 @@ def sync_one(k, order, owners, cc, co_c, lock):
         updates = {}
         if existing.get('properties',{}).get('dealstage') != stage_id:
             updates['dealstage'] = stage_id
-        odate = order.get('orderDate') or order.get('createdDate') or ''
-        if odate and (existing.get('properties',{}).get('closedate') or '')[:10] != odate[:10]:
+        odate = (order.get('orderDate') or order.get('createdDate') or
+                 order.get('dispatchedDate') or '')[:10]
+        if odate and (existing.get('properties',{}).get('closedate') or '')[:10] != odate:
             updates['closedate'] = odate
         if updates: update_deal(k, did, updates); res['action'] = 'updated'
         else: res['action'] = 'skipped'
@@ -336,44 +346,80 @@ def main():
     with st.sidebar:
         st.title("⚙️ Connections")
 
-        # Read from Streamlit secrets
+        # ── Cin7 ──────────────────────────────────────────────────────────────
+        st.subheader("Cin7 Omni")
+
+        # Try secrets first, fall back to manual entry
         try:
             cin7_user = st.secrets["CIN7_USERNAME"]
             cin7_key  = st.secrets["CIN7_API_KEY"]
-            hs_key    = st.secrets["HUBSPOT_API_KEY"]
-            st.success("✅ Cin7 connected")
-            st.success("✅ HubSpot connected")
+            st.caption(f"User: `{cin7_user}`")
         except Exception:
-            cin7_user = ""
-            cin7_key  = ""
-            hs_key    = ""
-            st.subheader("Cin7")
-            cin7_user = st.text_input("Username", key="cin7_user")
-            cin7_key  = st.text_input("API Key", type="password", key="cin7_key")
-            st.divider()
-            st.subheader("HubSpot")
-            hs_key = st.text_input("Private App Token", type="password", key="hs_key")
+            cin7_user = st.text_input("Username", key="cin7_user",
+                                      value=st.session_state.get("cin7_user_val",""))
+            cin7_key  = st.text_input("API Key", type="password", key="cin7_key",
+                                      value=st.session_state.get("cin7_key_val",""))
+            if cin7_user: st.session_state["cin7_user_val"] = cin7_user
+            if cin7_key:  st.session_state["cin7_key_val"]  = cin7_key
+
+        # Test Cin7 connection
+        cin7_ok = False
+        if cin7_user and cin7_key:
+            if st.button("🔌 Test Cin7", use_container_width=True):
+                ok, msg = test_cin7(cin7_user, cin7_key)
+                st.session_state['cin7_status'] = (ok, msg)
+            status = st.session_state.get('cin7_status')
+            if status:
+                if status[0]: st.success(f"✅ Connected")
+                else: st.error(f"❌ {status[1]}")
+        else:
+            st.warning("Enter Cin7 credentials")
 
         st.divider()
 
-        # Qualifying members status
+        # ── HubSpot ───────────────────────────────────────────────────────────
+        st.subheader("HubSpot")
+
+        try:
+            hs_key = st.secrets["HUBSPOT_API_KEY"]
+            st.caption("Token loaded from secrets")
+        except Exception:
+            hs_key = st.text_input("Private App Token", type="password", key="hs_key",
+                                   value=st.session_state.get("hs_key_val",""))
+            if hs_key: st.session_state["hs_key_val"] = hs_key
+
+        # Test HubSpot connection
+        if hs_key:
+            if st.button("🔌 Test HubSpot", use_container_width=True):
+                ok, msg = test_hubspot(hs_key)
+                st.session_state['hs_status'] = (ok, msg)
+            status = st.session_state.get('hs_status')
+            if status:
+                if status[0]: st.success(f"✅ Connected")
+                else: st.error(f"❌ {status[1]}")
+        else:
+            st.warning("Enter HubSpot token")
+
+        st.divider()
+
+        # ── Qualifying members status ──────────────────────────────────────────
         qm = st.session_state.qualifying_members
         if qm:
             q = set(st.session_state.qualifying_groups)
-            st.success(f"✅ {len(qm)} qualifying accounts loaded")
+            st.success(f"✅ {len(qm)} qualifying accounts")
             for g in sorted(q):
                 c = sum(1 for v in qm.values() if v == g)
                 if c: st.caption(f"  {g}: {c}")
-            if st.button("🔄 Reload accounts"):
+            if st.button("🔄 Reload accounts", use_container_width=True):
                 build_qualifying_members.clear()
                 st.session_state.qualifying_members = None
                 st.rerun()
         else:
-            st.caption("Accounts not loaded yet")
+            st.caption("⏳ Accounts not loaded yet")
 
         st.divider()
 
-        # Qualifying groups
+        # ── Qualifying groups ──────────────────────────────────────────────────
         with st.expander("🏷️ Qualifying Groups", expanded=False):
             st.caption("Cin7 group codes that qualify for import.")
             current = st.session_state.qualifying_groups
